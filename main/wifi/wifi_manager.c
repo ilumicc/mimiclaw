@@ -85,8 +85,6 @@ esp_err_t wifi_manager_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-
     ESP_LOGI(TAG, "WiFi manager initialized");
     return ESP_OK;
 }
@@ -124,6 +122,7 @@ esp_err_t wifi_manager_start(void)
 
     ESP_LOGI(TAG, "Connecting to SSID: %s", wifi_cfg.sta.ssid);
 
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -231,4 +230,33 @@ void wifi_manager_scan_and_print(void)
 
     free(ap_list);
     esp_wifi_connect();
+}
+
+bool wifi_manager_has_credentials(void)
+{
+    /* Check NVS first */
+    nvs_handle_t nvs;
+    if (nvs_open(MIMI_NVS_WIFI, NVS_READONLY, &nvs) == ESP_OK) {
+        char ssid[33] = {0};
+        size_t len = sizeof(ssid);
+        esp_err_t err = nvs_get_str(nvs, MIMI_NVS_KEY_SSID, ssid, &len);
+        nvs_close(nvs);
+        if (err == ESP_OK && ssid[0] != '\0') return true;
+    }
+
+    /* Fall back to build-time secrets */
+    if (MIMI_SECRET_WIFI_SSID[0] != '\0') return true;
+
+    return false;
+}
+
+esp_err_t wifi_manager_stop(void)
+{
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    s_connected = false;
+    s_retry_count = 0;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    ESP_LOGI(TAG, "WiFi stopped");
+    return ESP_OK;
 }

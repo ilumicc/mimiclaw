@@ -21,6 +21,7 @@ idf_component_register(
         "tools/tool_get_time.c"
         "tools/tool_files.c"
         "skills/skill_loader.c"
+        "onboard/wifi_onboard.c"
     INCLUDE_DIRS
         "."
     REQUIRES

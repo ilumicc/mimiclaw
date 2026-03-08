@@ -149,3 +149,11 @@
 #define MIMI_NVS_KEY_PROVIDER        "provider"
 #define MIMI_NVS_KEY_PROXY_HOST      "host"
 #define MIMI_NVS_KEY_PROXY_PORT      "port"
+#define MIMI_NVS_KEY_PROXY_TYPE      "type"
+
+/* WiFi Onboarding (Captive Portal) */
+#define MIMI_ONBOARD_AP_PREFIX    "MimiClaw-"
+#define MIMI_ONBOARD_AP_PASS      ""          /* open network */
+#define MIMI_ONBOARD_HTTP_PORT    80
+#define MIMI_ONBOARD_DNS_STACK    (4 * 1024)
+#define MIMI_ONBOARD_MAX_SCAN     20
