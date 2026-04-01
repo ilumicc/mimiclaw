@@ -26,6 +26,7 @@
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
 #include "onboard/wifi_onboard.h"
+#include "voice/voice_channel.h"
 
 static const char *TAG = "mimi";
 
@@ -92,6 +93,11 @@ static void outbound_dispatch_task(void *arg)
             if (ws_err != ESP_OK) {
                 ESP_LOGW(TAG, "WS send failed for %s: %s", msg.chat_id, esp_err_to_name(ws_err));
             }
+        } else if (strcmp(msg.channel, MIMI_CHAN_VOICE) == 0) {
+            esp_err_t voice_err = voice_channel_send_text(msg.chat_id, msg.content);
+            if (voice_err != ESP_OK) {
+                ESP_LOGW(TAG, "Voice outbound failed for %s: %s", msg.chat_id, esp_err_to_name(voice_err));
+            }
         } else if (strcmp(msg.channel, MIMI_CHAN_SYSTEM) == 0) {
             ESP_LOGI(TAG, "System message [%s]: %.128s", msg.chat_id, msg.content);
         } else {
@@ -136,6 +142,7 @@ void app_main(void)
     ESP_ERROR_CHECK(cron_service_init());
     ESP_ERROR_CHECK(heartbeat_init());
     ESP_ERROR_CHECK(agent_loop_init());
+    ESP_ERROR_CHECK(voice_channel_init());
 
     /* Start Serial CLI first (works without WiFi) */
     ESP_ERROR_CHECK(serial_cli_init());
@@ -182,6 +189,11 @@ void app_main(void)
         cron_service_start();
         heartbeat_start();
         ESP_ERROR_CHECK(ws_server_start());
+
+        esp_err_t voice_err = voice_channel_start();
+        if (voice_err != ESP_OK) {
+            ESP_LOGW(TAG, "Voice channel failed to start: %s", esp_err_to_name(voice_err));
+        }
 
         ESP_LOGI(TAG, "All services started!");
     }

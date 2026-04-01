@@ -46,6 +46,15 @@
 #ifndef MIMI_SECRET_TAVILY_KEY
 #define MIMI_SECRET_TAVILY_KEY      ""
 #endif
+#ifndef MIMI_SECRET_VOICE_WS_URL
+#define MIMI_SECRET_VOICE_WS_URL    ""
+#endif
+#ifndef MIMI_SECRET_VOICE_WS_TOKEN
+#define MIMI_SECRET_VOICE_WS_TOKEN  ""
+#endif
+#ifndef MIMI_SECRET_VOICE_WS_VERSION
+#define MIMI_SECRET_VOICE_WS_VERSION "v1"
+#endif
 
 /* WiFi */
 #define MIMI_WIFI_MAX_RETRY          10
@@ -139,6 +148,7 @@
 #define MIMI_NVS_LLM                 "llm_config"
 #define MIMI_NVS_PROXY               "proxy_config"
 #define MIMI_NVS_SEARCH              "search_config"
+#define MIMI_NVS_VOICE               "voice_config"
 
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID            "ssid"
@@ -153,6 +163,9 @@
 #define MIMI_NVS_KEY_PROXY_HOST      "host"
 #define MIMI_NVS_KEY_PROXY_PORT      "port"
 #define MIMI_NVS_KEY_PROXY_TYPE      "proxy_type"
+#define MIMI_NVS_KEY_VOICE_WS_URL    "voice_ws_url"
+#define MIMI_NVS_KEY_VOICE_WS_TOKEN  "voice_ws_token"
+#define MIMI_NVS_KEY_VOICE_WS_VER    "voice_ws_ver"
 
 /* WiFi Onboarding (Captive Portal) */
 #define MIMI_ONBOARD_AP_PREFIX    "MimiClaw-"

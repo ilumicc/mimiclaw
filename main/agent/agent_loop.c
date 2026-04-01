@@ -79,7 +79,9 @@ static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg
         "- source_channel: %s\n"
         "- source_chat_id: %s\n"
         "- If using cron_add for Telegram in this turn, set channel='telegram' and chat_id to source_chat_id.\n"
-        "- Never use chat_id 'cron' for Telegram messages.\n",
+        "- Never use chat_id 'cron' for Telegram messages.\n"
+        "- If source_channel is voice, keep replies concise and natural for TTS playback.\n"
+        "- Never reroute a voice turn to Telegram/WebSocket unless explicitly requested by user.\n",
         msg->channel[0] ? msg->channel : "(unknown)",
         msg->chat_id[0] ? msg->chat_id : "(empty)");
 
@@ -198,7 +200,7 @@ static void agent_loop_task(void *arg)
         ESP_LOGI(TAG, "LLM turn context: channel=%s chat_id=%s", msg.channel, msg.chat_id);
 
         /* 2. Load session history into cJSON array */
-        session_get_history_json(msg.chat_id, history_json,
+        session_get_history_json(msg.channel, msg.chat_id, history_json,
                                  MIMI_LLM_STREAM_BUF_SIZE, MIMI_AGENT_MAX_HISTORY);
 
         cJSON *messages = cJSON_Parse(history_json);
@@ -275,8 +277,8 @@ static void agent_loop_task(void *arg)
         /* 5. Send response */
         if (final_text && final_text[0]) {
             /* Save to session (only user text + final assistant text) */
-            esp_err_t save_user = session_append(msg.chat_id, "user", msg.content);
-            esp_err_t save_asst = session_append(msg.chat_id, "assistant", final_text);
+            esp_err_t save_user = session_append(msg.channel, msg.chat_id, "user", msg.content);
+            esp_err_t save_asst = session_append(msg.channel, msg.chat_id, "assistant", final_text);
             if (save_user != ESP_OK || save_asst != ESP_OK) {
                 ESP_LOGW(TAG, "Session save failed for chat %s (user=%s, assistant=%s)",
                          msg.chat_id,

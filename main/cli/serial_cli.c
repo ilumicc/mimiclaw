@@ -1,5 +1,6 @@
 #include "serial_cli.h"
 #include "mimi_config.h"
+#include "bus/message_bus.h"
 #include "wifi/wifi_manager.h"
 #include "channels/telegram/telegram_bot.h"
 #include "channels/feishu/feishu_bot.h"
@@ -12,6 +13,7 @@
 #include "cron/cron_service.h"
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
+#include "voice/voice_channel.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -217,6 +219,7 @@ static int cmd_session_list(int argc, char **argv)
 /* --- session_clear command --- */
 static struct {
     struct arg_str *chat_id;
+    struct arg_str *channel;
     struct arg_end *end;
 } session_clear_args;
 
@@ -227,8 +230,14 @@ static int cmd_session_clear(int argc, char **argv)
         arg_print_errors(stderr, session_clear_args.end, argv[0]);
         return 1;
     }
-    if (session_clear(session_clear_args.chat_id->sval[0]) == ESP_OK) {
-        printf("Session cleared.\n");
+
+    const char *channel = MIMI_CHAN_TELEGRAM;
+    if (session_clear_args.channel->count > 0 && session_clear_args.channel->sval[0]) {
+        channel = session_clear_args.channel->sval[0];
+    }
+
+    if (session_clear(channel, session_clear_args.chat_id->sval[0]) == ESP_OK) {
+        printf("Session cleared for %s.\n", channel);
     } else {
         printf("Session not found.\n");
     }
@@ -319,6 +328,76 @@ static int cmd_set_tavily_key(int argc, char **argv)
     printf("Tavily API key saved.\n");
     return 0;
 }
+
+/* --- set_voice_ws command --- */
+static struct {
+    struct arg_str *url;
+    struct arg_end *end;
+} voice_ws_args;
+
+static int cmd_set_voice_ws(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&voice_ws_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, voice_ws_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_channel_set_ws_url(voice_ws_args.url->sval[0]);
+    printf("set_voice_ws status: %s\n", esp_err_to_name(err));
+    if (err == ESP_OK) {
+        printf("Voice WS URL saved. Restart to apply.\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* --- set_voice_token command --- */
+static struct {
+    struct arg_str *token;
+    struct arg_end *end;
+} voice_token_args;
+
+static int cmd_set_voice_token(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&voice_token_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, voice_token_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_channel_set_ws_token(voice_token_args.token->sval[0]);
+    printf("set_voice_token status: %s\n", esp_err_to_name(err));
+    if (err == ESP_OK) {
+        printf("Voice token saved. Restart to apply.\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* --- set_voice_version command --- */
+static struct {
+    struct arg_str *version;
+    struct arg_end *end;
+} voice_version_args;
+
+static int cmd_set_voice_version(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&voice_version_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, voice_version_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_channel_set_ws_version(voice_version_args.version->sval[0]);
+    printf("set_voice_version status: %s\n", esp_err_to_name(err));
+    if (err == ESP_OK) {
+        printf("Voice protocol version saved.\n");
+        return 0;
+    }
+    return 1;
+}
+
 
 /* --- wifi_scan command --- */
 static int cmd_wifi_scan(int argc, char **argv)
@@ -567,6 +646,9 @@ static int cmd_config_show(int argc, char **argv)
     print_config_u16("Proxy Port", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
     print_config("Tavily Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_TAVILY_KEY, MIMI_SECRET_TAVILY_KEY, true);
+    print_config("Voice WS URL", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_URL, MIMI_SECRET_VOICE_WS_URL, false);
+    print_config("Voice Token", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_TOKEN, MIMI_SECRET_VOICE_WS_TOKEN, true);
+    print_config("Voice Version", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_VER, MIMI_SECRET_VOICE_WS_VERSION, false);
     printf("=============================\n");
     return 0;
 }
@@ -575,9 +657,9 @@ static int cmd_config_show(int argc, char **argv)
 static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
-        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH
+        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH, MIMI_NVS_VOICE
     };
-    for (int i = 0; i < 5; i++) {
+    for (size_t i = 0; i < (sizeof(namespaces) / sizeof(namespaces[0])); i++) {
         nvs_handle_t nvs;
         if (nvs_open(namespaces[i], NVS_READWRITE, &nvs) == ESP_OK) {
             nvs_erase_all(nvs);
@@ -956,10 +1038,11 @@ esp_err_t serial_cli_init(void)
 
     /* session_clear */
     session_clear_args.chat_id = arg_str1(NULL, NULL, "<chat_id>", "Chat ID to clear");
-    session_clear_args.end = arg_end(1);
+    session_clear_args.channel = arg_str0(NULL, NULL, "<channel>", "Optional channel (default: telegram)");
+    session_clear_args.end = arg_end(2);
     esp_console_cmd_t sess_clear_cmd = {
         .command = "session_clear",
-        .help = "Clear a session",
+        .help = "Clear a session: session_clear <chat_id> [channel]",
         .func = &cmd_session_clear,
         .argtable = &session_clear_args,
     };
@@ -993,6 +1076,40 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_set_tavily_key,
         .argtable = &tavily_key_args,
     };
+
+    /* set_voice_ws */
+    voice_ws_args.url = arg_str1(NULL, NULL, "<ws_url>", "Voice WebSocket URL");
+    voice_ws_args.end = arg_end(1);
+    esp_console_cmd_t voice_ws_cmd = {
+        .command = "set_voice_ws",
+        .help = "Set voice websocket endpoint URL",
+        .func = &cmd_set_voice_ws,
+        .argtable = &voice_ws_args,
+    };
+    esp_console_cmd_register(&voice_ws_cmd);
+
+    /* set_voice_token */
+    voice_token_args.token = arg_str1(NULL, NULL, "<token>", "Voice websocket auth token");
+    voice_token_args.end = arg_end(1);
+    esp_console_cmd_t voice_token_cmd = {
+        .command = "set_voice_token",
+        .help = "Set voice websocket auth token",
+        .func = &cmd_set_voice_token,
+        .argtable = &voice_token_args,
+    };
+    esp_console_cmd_register(&voice_token_cmd);
+
+    /* set_voice_version */
+    voice_version_args.version = arg_str1(NULL, NULL, "<version>", "Voice protocol version");
+    voice_version_args.end = arg_end(1);
+    esp_console_cmd_t voice_version_cmd = {
+        .command = "set_voice_version",
+        .help = "Set voice protocol version string",
+        .func = &cmd_set_voice_version,
+        .argtable = &voice_version_args,
+    };
+    esp_console_cmd_register(&voice_version_cmd);
+
     esp_console_cmd_register(&tavily_key_cmd);
 
     /* set_proxy */
