@@ -138,8 +138,11 @@ esp_err_t speaker_i2s_init(void)
 
     s_initialized = true;
     s_channel_enabled = false;
-    ESP_LOGI(TAG, "I2S speaker ready (WS=%d BCLK=%d DOUT=%d)",
-             MIMI_SPK_I2S_WS_GPIO, MIMI_SPK_I2S_BCLK_GPIO, MIMI_SPK_I2S_DOUT_GPIO);
+    ESP_LOGI(TAG, "I2S speaker ready (WS=%d BCLK=%d DOUT=%d, attn=%dx)",
+             MIMI_SPK_I2S_WS_GPIO,
+             MIMI_SPK_I2S_BCLK_GPIO,
+             MIMI_SPK_I2S_DOUT_GPIO,
+             MIMI_SPK_PCM_ATTENUATION);
     return ESP_OK;
 }
 
@@ -172,8 +175,18 @@ static esp_err_t speaker_reconfig_clock(uint32_t sample_rate)
     return err;
 }
 
+static inline int16_t speaker_attenuate_sample(int16_t sample)
+{
+#if MIMI_SPK_PCM_ATTENUATION <= 1
+    return sample;
+#else
+    return (int16_t)(sample / MIMI_SPK_PCM_ATTENUATION);
+#endif
+}
+
 static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
 {
+#if MIMI_SPK_PCM_ATTENUATION <= 1
     size_t written = 0;
     while (written < len) {
         size_t out = 0;
@@ -185,6 +198,53 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
         written += out;
     }
     return ESP_OK;
+#else
+    const size_t chunk_bytes = 1024;
+    int16_t *scaled = malloc(chunk_bytes);
+    if (!scaled) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t offset = 0;
+    while (offset < len) {
+        size_t take = len - offset;
+        if (take > chunk_bytes) {
+            take = chunk_bytes;
+        }
+        if (take % 2) {
+            take--;
+        }
+        if (take == 0) {
+            break;
+        }
+
+        const int16_t *src = (const int16_t *)(data + offset);
+        size_t samples = take / 2;
+        for (size_t i = 0; i < samples; i++) {
+            scaled[i] = speaker_attenuate_sample(src[i]);
+        }
+
+        size_t written = 0;
+        while (written < take) {
+            size_t out = 0;
+            esp_err_t err = i2s_channel_write(s_tx,
+                                              ((const uint8_t *)scaled) + written,
+                                              take - written,
+                                              &out,
+                                              pdMS_TO_TICKS(2000));
+            if (err != ESP_OK) {
+                free(scaled);
+                return err;
+            }
+            written += out;
+        }
+
+        offset += take;
+    }
+
+    free(scaled);
+    return ESP_OK;
+#endif
 }
 
 static esp_err_t write_pcm_mono_dup(const uint8_t *data, size_t len)
@@ -211,8 +271,9 @@ static esp_err_t write_pcm_mono_dup(const uint8_t *data, size_t len)
         const int16_t *mono = (const int16_t *)(data + offset);
         size_t samples = take / 2;
         for (size_t i = 0; i < samples; i++) {
-            stereo[i * 2] = mono[i];
-            stereo[i * 2 + 1] = mono[i];
+            int16_t s = speaker_attenuate_sample(mono[i]);
+            stereo[i * 2] = s;
+            stereo[i * 2 + 1] = s;
         }
 
         esp_err_t err = write_pcm_stereo((const uint8_t *)stereo, samples * 4);
