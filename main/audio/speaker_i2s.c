@@ -214,6 +214,9 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
         if (err != ESP_OK) {
             return err;
         }
+        if (out == 0) {
+            return ESP_ERR_TIMEOUT;
+        }
         written += out;
     }
     return ESP_OK;
@@ -254,6 +257,10 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
             if (err != ESP_OK) {
                 free(scaled);
                 return err;
+            }
+            if (out == 0) {
+                free(scaled);
+                return ESP_ERR_TIMEOUT;
             }
             written += out;
         }
