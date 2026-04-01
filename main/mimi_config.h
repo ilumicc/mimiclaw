@@ -124,7 +124,7 @@
 #define MIMI_TTS_PRIO                5
 #define MIMI_TTS_CORE                0
 #define MIMI_TTS_HTTP_RETRY_COUNT   2
-
+#define MIMI_TTS_HTTP_RETRY_BACKOFF_MS 250
 
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"

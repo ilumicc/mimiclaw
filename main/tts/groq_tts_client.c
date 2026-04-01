@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <sys/types.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -406,10 +409,15 @@ esp_err_t groq_tts_synthesize_wav(const char *text, uint8_t **out_wav, size_t *o
         int status = 0;
         err = groq_http_request(payload, &body, &status);
         if (err == ESP_ERR_HTTP_INCOMPLETE_DATA && attempt < max_attempts) {
-            ESP_LOGW(TAG, "Groq TTS incomplete HTTP data (attempt %d/%d), retrying",
+            const uint32_t delay_ms = (uint32_t)MIMI_TTS_HTTP_RETRY_BACKOFF_MS * (uint32_t)attempt;
+            ESP_LOGW(TAG, "Groq TTS incomplete HTTP data (attempt %d/%d), retrying in %u ms",
                      attempt,
-                     max_attempts);
+                     max_attempts,
+                     (unsigned)delay_ms);
             bin_buf_free(&body);
+            if (delay_ms > 0) {
+                vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            }
             continue;
         }
 
