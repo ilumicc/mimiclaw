@@ -127,12 +127,30 @@
 #define MIMI_TTS_HTTP_RETRY_BACKOFF_MS 250
 
 /* Wake / Voice Session */
-#define MIMI_WAKE_ENABLED_DEFAULT    1
-#define MIMI_WAKE_COOLDOWN_MS        3500
-#define MIMI_VOICE_LISTEN_TIMEOUT_MS 7000
-#define MIMI_VOICE_SESSION_STACK     (6 * 1024)
-#define MIMI_VOICE_SESSION_PRIO      4
-#define MIMI_VOICE_SESSION_CORE      0
+#define MIMI_WAKE_ENABLED_DEFAULT          1
+#define MIMI_WAKE_COOLDOWN_MS              3500
+#define MIMI_WAKE_LOCAL_DETECT_DEFAULT     0
+#define MIMI_WAKE_RMS_THRESHOLD_DEFAULT    1800
+#define MIMI_WAKE_RMS_CONSEC_FRAMES_DEFAULT 3
+
+#define MIMI_VOICE_LISTEN_TIMEOUT_MS       7000
+#define MIMI_VOICE_SESSION_MAX_AUDIO_BYTES (160 * 1024)
+#define MIMI_VOICE_SESSION_STACK           (6 * 1024)
+#define MIMI_VOICE_SESSION_PRIO            4
+#define MIMI_VOICE_SESSION_CORE            0
+
+/* Audio capture contract / HAL */
+#define MIMI_AUDIO_FRAME_MAX_SAMPLES       320   /* 20 ms at 16k mono */
+#define MIMI_MIC_CAPTURE_ENABLED_DEFAULT   0
+#define MIMI_MIC_SAMPLE_RATE_HZ            16000
+#define MIMI_MIC_FRAME_SAMPLES             320
+#define MIMI_MIC_RING_DEPTH                24
+#define MIMI_MIC_I2S_WS_GPIO               -1
+#define MIMI_MIC_I2S_BCLK_GPIO             -1
+#define MIMI_MIC_I2S_DIN_GPIO              -1
+#define MIMI_AUDIO_CAPTURE_STACK           (5 * 1024)
+#define MIMI_AUDIO_CAPTURE_PRIO            5
+#define MIMI_AUDIO_CAPTURE_CORE            0
 
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"
@@ -201,10 +219,13 @@
 #define MIMI_NVS_KEY_PROXY_TYPE      "proxy_type"
 #define MIMI_NVS_KEY_VOICE_WS_URL    "voice_ws_url"
 #define MIMI_NVS_KEY_VOICE_WS_TOKEN  "voice_ws_token"
-#define MIMI_NVS_KEY_VOICE_WS_VER    "voice_ws_ver"
-#define MIMI_NVS_KEY_WAKE_ENABLED    "wake_enabled"
-#define MIMI_NVS_KEY_WAKE_COOLDOWN_MS "wake_cd_ms"
-#define MIMI_NVS_KEY_GROQ_API_KEY    "groq_key"
+#define MIMI_NVS_KEY_VOICE_WS_VER      "voice_ws_ver"
+#define MIMI_NVS_KEY_WAKE_ENABLED      "wake_enabled"
+#define MIMI_NVS_KEY_WAKE_COOLDOWN_MS  "wake_cd_ms"
+#define MIMI_NVS_KEY_WAKE_LOCAL_ENABLED "wake_local_en"
+#define MIMI_NVS_KEY_WAKE_RMS_THRESHOLD "wake_rms_th"
+#define MIMI_NVS_KEY_MIC_CAPTURE_ENABLED "mic_cap_en"
+#define MIMI_NVS_KEY_GROQ_API_KEY      "groq_key"
 #define MIMI_NVS_KEY_TTS_MODEL       "tts_model"
 #define MIMI_NVS_KEY_TTS_VOICE       "tts_voice"
 

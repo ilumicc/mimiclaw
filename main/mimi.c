@@ -29,6 +29,7 @@
 #include "voice/voice_channel.h"
 #include "voice/wake_service.h"
 #include "voice/voice_session_coordinator.h"
+#include "audio/audio_hal_capture.h"
 #include "tts/tts_service.h"
 
 static const char *TAG = "mimi";
@@ -146,12 +147,19 @@ void app_main(void)
     ESP_ERROR_CHECK(heartbeat_init());
     ESP_ERROR_CHECK(agent_loop_init());
     ESP_ERROR_CHECK(voice_channel_init());
+    ESP_ERROR_CHECK(audio_hal_capture_init());
     ESP_ERROR_CHECK(wake_service_init());
     ESP_ERROR_CHECK(voice_session_coordinator_init());
     ESP_ERROR_CHECK(tts_service_init());
 
     /* Start Serial CLI first (works without WiFi) */
     ESP_ERROR_CHECK(serial_cli_init());
+    esp_err_t audio_cap_err = audio_hal_capture_start();
+    if (audio_cap_err != ESP_OK) {
+        ESP_LOGW(TAG, "Audio capture failed to start: %s", esp_err_to_name(audio_cap_err));
+    }
+
+
 
     /* Start WiFi */
     esp_err_t wifi_err = wifi_manager_start();

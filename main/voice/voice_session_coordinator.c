@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "mimi_config.h"
 #include "bus/message_bus.h"
@@ -23,7 +24,12 @@ static bool s_initialized = false;
 
 static voice_session_state_t s_state = VOICE_SESSION_IDLE;
 static TickType_t s_listen_started_tick = 0;
+static uint64_t s_listen_started_ts_ms = 0;
+static uint32_t s_listen_audio_bytes = 0;
+static uint32_t s_listen_audio_frames = 0;
+static bool s_listen_clipped = false;
 static voice_session_stats_t s_stats = {0};
+static voice_session_ready_t s_last_ready = {0};
 
 static bool session_lock_take(TickType_t ticks)
 {
@@ -76,20 +82,42 @@ static void session_mark_ready_locked(bool timeout_reason)
     }
 
     TickType_t now = xTaskGetTickCount();
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
     uint32_t elapsed_ms = (uint32_t)pdTICKS_TO_MS(now - s_listen_started_tick);
 
     s_state = VOICE_SESSION_END_UTTERANCE;
     s_stats.state = s_state;
     s_stats.sessions_ready++;
     s_stats.last_session_ms = elapsed_ms;
+    s_stats.last_session_bytes = s_listen_audio_bytes;
+    s_stats.last_session_frames = s_listen_audio_frames;
     if (timeout_reason) {
         s_stats.sessions_timeout++;
     }
+    if (s_listen_clipped) {
+        s_stats.sessions_clipped++;
+    }
 
-    char detail[128] = {0};
-    snprintf(detail, sizeof(detail), "dur_ms=%u reason=%s",
+    memset(&s_last_ready, 0, sizeof(s_last_ready));
+    s_last_ready.valid = true;
+    s_last_ready.timeout_reason = timeout_reason;
+    s_last_ready.clipped = s_listen_clipped;
+    s_last_ready.start_ts_ms = s_listen_started_ts_ms;
+    s_last_ready.end_ts_ms = now_ms;
+    s_last_ready.duration_ms = elapsed_ms;
+    s_last_ready.audio_bytes = s_listen_audio_bytes;
+    s_last_ready.audio_frames = s_listen_audio_frames;
+    s_last_ready.sample_rate_hz = MIMI_MIC_SAMPLE_RATE_HZ;
+    s_last_ready.channels = 1;
+    s_last_ready.bits_per_sample = 16;
+
+    char detail[160] = {0};
+    snprintf(detail, sizeof(detail), "dur_ms=%u bytes=%u frames=%u reason=%s%s",
              (unsigned)elapsed_ms,
-             timeout_reason ? "timeout" : "final_text");
+             (unsigned)s_listen_audio_bytes,
+             (unsigned)s_listen_audio_frames,
+             timeout_reason ? "timeout" : "final_text",
+             s_listen_clipped ? " clipped=1" : "");
     publish_system_event("voice_session_ready", detail);
 
     s_state = VOICE_SESSION_IDLE;
@@ -118,6 +146,10 @@ static void wake_event_cb(const wake_event_t *event, void *ctx)
     s_stats.state = s_state;
     s_stats.sessions_started++;
     s_listen_started_tick = xTaskGetTickCount();
+    s_listen_started_ts_ms = event->ts_ms;
+    s_listen_audio_bytes = 0;
+    s_listen_audio_frames = 0;
+    s_listen_clipped = false;
 
     session_lock_give();
 
@@ -164,7 +196,13 @@ esp_err_t voice_session_coordinator_init(void)
     }
 
     memset(&s_stats, 0, sizeof(s_stats));
+    memset(&s_last_ready, 0, sizeof(s_last_ready));
     s_state = VOICE_SESSION_IDLE;
+    s_listen_started_tick = 0;
+    s_listen_started_ts_ms = 0;
+    s_listen_audio_bytes = 0;
+    s_listen_audio_frames = 0;
+    s_listen_clipped = false;
     s_stats.state = s_state;
 
     session_lock_give();
@@ -188,6 +226,39 @@ esp_err_t voice_session_coordinator_init(void)
     ESP_LOGI(TAG, "Voice session coordinator initialized");
     return ESP_OK;
 }
+
+esp_err_t voice_session_coordinator_on_audio_frame(const audio_frame_t *frame)
+{
+    if (!frame) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!session_lock_take(pdMS_TO_TICKS(20))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (s_state == VOICE_SESSION_LISTENING) {
+        uint32_t bytes = frame->data_bytes;
+        if (s_listen_audio_bytes + bytes > MIMI_VOICE_SESSION_MAX_AUDIO_BYTES) {
+            if (s_listen_audio_bytes < MIMI_VOICE_SESSION_MAX_AUDIO_BYTES) {
+                bytes = MIMI_VOICE_SESSION_MAX_AUDIO_BYTES - s_listen_audio_bytes;
+            } else {
+                bytes = 0;
+            }
+            s_listen_clipped = true;
+        }
+
+        s_listen_audio_bytes += bytes;
+        s_listen_audio_frames++;
+    }
+
+    session_lock_give();
+    return ESP_OK;
+}
+
 
 esp_err_t voice_session_coordinator_on_transcript_final(const char *text)
 {
@@ -244,6 +315,24 @@ esp_err_t voice_session_coordinator_get_stats(voice_session_stats_t *out)
     }
     *out = s_stats;
     out->state = s_state;
+    session_lock_give();
+    return ESP_OK;
+}
+
+esp_err_t voice_session_coordinator_get_last_ready(voice_session_ready_t *out)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!session_lock_take(pdMS_TO_TICKS(100))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    *out = s_last_ready;
     session_lock_give();
     return ESP_OK;
 }

@@ -19,6 +19,7 @@
 #include "tts/tts_service.h"
 #include "tts/groq_tts_client.h"
 #include "audio/speaker_i2s.h"
+#include "audio/audio_hal_capture.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -646,6 +647,54 @@ static int cmd_wake_cooldown(int argc, char **argv)
 }
 
 
+/* --- wake_local_on command --- */
+static int cmd_wake_local_on(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = wake_service_set_local_detector_enabled(true);
+    printf("wake_local_on status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- wake_local_off command --- */
+static int cmd_wake_local_off(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = wake_service_set_local_detector_enabled(false);
+    printf("wake_local_off status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- wake_threshold command --- */
+static struct {
+    struct arg_int *value;
+    struct arg_end *end;
+} wake_threshold_args;
+
+static int cmd_wake_threshold(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&wake_threshold_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, wake_threshold_args.end, argv[0]);
+        return 1;
+    }
+
+    int value = wake_threshold_args.value->ival[0];
+    if (value <= 0 || value > 32767) {
+        printf("wake_threshold expects 1..32767\n");
+        return 1;
+    }
+
+    esp_err_t err = wake_service_set_rms_threshold((uint16_t)value);
+    printf("wake_threshold status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+
 /* --- wake_test command --- */
 static int cmd_wake_test(int argc, char **argv)
 {
@@ -653,6 +702,36 @@ static int cmd_wake_test(int argc, char **argv)
     esp_err_t err = wake_service_notify_detected("cli", phrase);
     printf("wake_test status: %s\n", esp_err_to_name(err));
     return (err == ESP_OK) ? 0 : 1;
+}
+
+
+/* --- audio_capture_stats command --- */
+static int cmd_audio_capture_stats(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    audio_hal_capture_stats_t st = {0};
+    esp_err_t err = audio_hal_capture_get_stats(&st);
+    if (err != ESP_OK) {
+        printf("audio_capture_stats status: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("audio_capture: init=%s enabled=%s running=%s %uHz frame=%u read(ok=%u fail=%u drop=%u ovf=%u) ring(fill=%u peak=%u) avg_lat=%uus\n",
+           st.initialized ? "yes" : "no",
+           st.enabled ? "yes" : "no",
+           st.running ? "yes" : "no",
+           (unsigned)st.sample_rate_hz,
+           (unsigned)st.frame_samples,
+           (unsigned)st.read_ok,
+           (unsigned)st.read_fail,
+           (unsigned)st.ring_drop,
+           (unsigned)st.overflow_events,
+           (unsigned)st.ring.current_fill,
+           (unsigned)st.ring.peak_fill,
+           (unsigned)st.avg_read_latency_us);
+    return 0;
 }
 
 /* --- wake_stats command --- */
@@ -668,10 +747,13 @@ static int cmd_wake_stats(int argc, char **argv)
         return 1;
     }
 
-    printf("wake: enabled=%s paused=%s cooldown=%ums hit=%u cb=%u suppress(dis=%u pause=%u cd=%u) last_src=%s last_age=%ums\n",
+    printf("wake: enabled=%s paused=%s cooldown=%ums local=%s rms_th=%u frame=%u hit=%u cb=%u suppress(dis=%u pause=%u cd=%u) last_src=%s last_age=%ums\n",
            wake.enabled ? "yes" : "no",
            wake.paused ? "yes" : "no",
            (unsigned)wake.cooldown_ms,
+           wake.local_detector_enabled ? "yes" : "no",
+           (unsigned)wake.local_rms_threshold,
+           (unsigned)wake.audio_frames_processed,
            (unsigned)wake.wake_detected,
            (unsigned)wake.callbacks_fired,
            (unsigned)wake.suppressed_disabled,
@@ -683,13 +765,27 @@ static int cmd_wake_stats(int argc, char **argv)
     voice_session_stats_t sess = {0};
     esp_err_t sess_err = voice_session_coordinator_get_stats(&sess);
     if (sess_err == ESP_OK) {
-        printf("voice_session: state=%s wake=%u start=%u ready=%u timeout=%u last_ms=%u\n",
+        printf("voice_session: state=%s wake=%u start=%u ready=%u timeout=%u clip=%u last_ms=%u bytes=%u frames=%u\n",
                voice_session_coordinator_state_str(sess.state),
                (unsigned)sess.wake_hits,
                (unsigned)sess.sessions_started,
                (unsigned)sess.sessions_ready,
                (unsigned)sess.sessions_timeout,
-               (unsigned)sess.last_session_ms);
+               (unsigned)sess.sessions_clipped,
+               (unsigned)sess.last_session_ms,
+               (unsigned)sess.last_session_bytes,
+               (unsigned)sess.last_session_frames);
+
+        voice_session_ready_t ready = {0};
+        if (voice_session_coordinator_get_last_ready(&ready) == ESP_OK && ready.valid) {
+            printf("voice_ready: dur=%ums bytes=%u frames=%u timeout=%s clip=%s sr=%u\n",
+                   (unsigned)ready.duration_ms,
+                   (unsigned)ready.audio_bytes,
+                   (unsigned)ready.audio_frames,
+                   ready.timeout_reason ? "yes" : "no",
+                   ready.clipped ? "yes" : "no",
+                   (unsigned)ready.sample_rate_hz);
+        }
     } else {
         printf("voice_session: %s\n", esp_err_to_name(sess_err));
     }
@@ -962,7 +1058,9 @@ static int cmd_config_show(int argc, char **argv)
     (void)argv;
 
     char wake_cd_build[16] = {0};
+    char wake_rms_build[16] = {0};
     snprintf(wake_cd_build, sizeof(wake_cd_build), "%u", (unsigned)MIMI_WAKE_COOLDOWN_MS);
+    snprintf(wake_rms_build, sizeof(wake_rms_build), "%u", (unsigned)MIMI_WAKE_RMS_THRESHOLD_DEFAULT);
 
     printf("=== Current Configuration ===\n");
     print_config("WiFi SSID",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_SSID,     MIMI_SECRET_WIFI_SSID,  false);
@@ -979,7 +1077,10 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Voice Token", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_TOKEN, MIMI_SECRET_VOICE_WS_TOKEN, true);
     print_config("Voice Version", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_VER, MIMI_SECRET_VOICE_WS_VERSION, false);
     print_config_u8("Wake Enabled", MIMI_NVS_VOICE, MIMI_NVS_KEY_WAKE_ENABLED, MIMI_WAKE_ENABLED_DEFAULT);
+    print_config_u8("Wake Local", MIMI_NVS_VOICE, MIMI_NVS_KEY_WAKE_LOCAL_ENABLED, MIMI_WAKE_LOCAL_DETECT_DEFAULT);
     print_config_u16("Wake Cooldown", MIMI_NVS_VOICE, MIMI_NVS_KEY_WAKE_COOLDOWN_MS, wake_cd_build);
+    print_config_u16("Wake RMS", MIMI_NVS_VOICE, MIMI_NVS_KEY_WAKE_RMS_THRESHOLD, wake_rms_build);
+    print_config_u8("Mic Capture", MIMI_NVS_VOICE, MIMI_NVS_KEY_MIC_CAPTURE_ENABLED, MIMI_MIC_CAPTURE_ENABLED_DEFAULT);
     print_config("Groq Key", MIMI_NVS_TTS, MIMI_NVS_KEY_GROQ_API_KEY, MIMI_SECRET_GROQ_API_KEY, true);
     print_config("TTS Model", MIMI_NVS_TTS, MIMI_NVS_KEY_TTS_MODEL, MIMI_SECRET_TTS_MODEL, false);
     print_config("TTS Voice", MIMI_NVS_TTS, MIMI_NVS_KEY_TTS_VOICE, MIMI_SECRET_TTS_VOICE, false);
@@ -1553,6 +1654,33 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&wake_cooldown_cmd);
 
+    /* wake_local_on */
+    esp_console_cmd_t wake_local_on_cmd = {
+        .command = "wake_local_on",
+        .help = "Enable local mic-based wake detector",
+        .func = &cmd_wake_local_on,
+    };
+    esp_console_cmd_register(&wake_local_on_cmd);
+
+    /* wake_local_off */
+    esp_console_cmd_t wake_local_off_cmd = {
+        .command = "wake_local_off",
+        .help = "Disable local mic-based wake detector",
+        .func = &cmd_wake_local_off,
+    };
+    esp_console_cmd_register(&wake_local_off_cmd);
+
+    /* wake_threshold */
+    wake_threshold_args.value = arg_int1(NULL, NULL, "<value>", "Local wake RMS threshold");
+    wake_threshold_args.end = arg_end(1);
+    esp_console_cmd_t wake_threshold_cmd = {
+        .command = "wake_threshold",
+        .help = "Set local wake RMS threshold",
+        .func = &cmd_wake_threshold,
+        .argtable = &wake_threshold_args,
+    };
+    esp_console_cmd_register(&wake_threshold_cmd);
+
     /* wake_stats */
     esp_console_cmd_t wake_stats_cmd = {
         .command = "wake_stats",
@@ -1568,6 +1696,14 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_wake_test,
     };
     esp_console_cmd_register(&wake_test_cmd);
+
+    /* audio_capture_stats */
+    esp_console_cmd_t audio_capture_stats_cmd = {
+        .command = "audio_capture_stats",
+        .help = "Show mic capture/ring runtime metrics",
+        .func = &cmd_audio_capture_stats,
+    };
+    esp_console_cmd_register(&audio_capture_stats_cmd);
 
     esp_console_cmd_register(&tavily_key_cmd);
 

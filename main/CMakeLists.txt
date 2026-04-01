@@ -30,6 +30,8 @@ idf_component_register(
         "tts/groq_tts_client.c"
         "tts/tts_service.c"
         "audio/speaker_i2s.c"
+        "audio/audio_ring_buffer.c"
+        "audio/audio_hal_capture.c"
     INCLUDE_DIRS
         "."
     REQUIRES
