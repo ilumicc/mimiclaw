@@ -250,6 +250,15 @@ static esp_err_t groq_http_proxy(const char *payload, bin_buf_t *body_buf, int *
     return err;
 }
 
+static esp_err_t groq_http_request(const char *payload, bin_buf_t *body_buf, int *out_status)
+{
+    if (http_proxy_is_enabled()) {
+        return groq_http_proxy(payload, body_buf, out_status);
+    }
+    return groq_http_direct(payload, body_buf, out_status);
+}
+
+
 static esp_err_t build_payload_json(const char *text, char **out_json)
 {
     cJSON *root = cJSON_CreateObject();
@@ -385,49 +394,64 @@ esp_err_t groq_tts_synthesize_wav(const char *text, uint8_t **out_wav, size_t *o
         return err;
     }
 
-    bin_buf_t body;
-    err = bin_buf_init(&body, 8192);
-    if (err != ESP_OK) {
-        free(payload);
-        return err;
-    }
-
-    int status = 0;
-    if (http_proxy_is_enabled()) {
-        err = groq_http_proxy(payload, &body, &status);
-    } else {
-        err = groq_http_direct(payload, &body, &status);
-    }
-    free(payload);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Groq TTS request failed: %s", esp_err_to_name(err));
-        bin_buf_free(&body);
-        return err;
-    }
-
-    if (status != 200) {
-        size_t preview_len = body.len < 160 ? body.len : 160;
-        char preview[161] = {0};
-        memcpy(preview, body.data, preview_len);
-        for (size_t i = 0; i < preview_len; i++) {
-            if (preview[i] == '\n' || preview[i] == '\r' || preview[i] == '\t') {
-                preview[i] = ' ';
-            }
+    const int max_attempts = MIMI_TTS_HTTP_RETRY_COUNT + 1;
+    for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        bin_buf_t body;
+        err = bin_buf_init(&body, 8192);
+        if (err != ESP_OK) {
+            free(payload);
+            return err;
         }
-        ESP_LOGE(TAG, "Groq TTS HTTP %d: %s", status, preview);
-        bin_buf_free(&body);
-        return ESP_ERR_HTTP_FETCH_HEADER;
+
+        int status = 0;
+        err = groq_http_request(payload, &body, &status);
+        if (err == ESP_ERR_HTTP_INCOMPLETE_DATA && attempt < max_attempts) {
+            ESP_LOGW(TAG, "Groq TTS incomplete HTTP data (attempt %d/%d), retrying",
+                     attempt,
+                     max_attempts);
+            bin_buf_free(&body);
+            continue;
+        }
+
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Groq TTS request failed: %s", esp_err_to_name(err));
+            bin_buf_free(&body);
+            free(payload);
+            return err;
+        }
+
+        if (status != 200) {
+            size_t preview_len = body.len < 160 ? body.len : 160;
+            char preview[161] = {0};
+            memcpy(preview, body.data, preview_len);
+            for (size_t i = 0; i < preview_len; i++) {
+                if (preview[i] == '\n' || preview[i] == '\r' || preview[i] == '\t') {
+                    preview[i] = ' ';
+                }
+            }
+            ESP_LOGE(TAG, "Groq TTS HTTP %d: %s", status, preview);
+            bin_buf_free(&body);
+            free(payload);
+            return ESP_ERR_HTTP_FETCH_HEADER;
+        }
+
+        if (!wav_header_seems_valid(body.data, body.len)) {
+            ESP_LOGE(TAG, "Groq TTS returned non-WAV payload (%u bytes)", (unsigned)body.len);
+            bin_buf_free(&body);
+            free(payload);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+
+        *out_wav = body.data;
+        *out_len = body.len;
+        ESP_LOGI(TAG, "Groq TTS OK: %u bytes WAV (attempt %d/%d)",
+                 (unsigned)body.len,
+                 attempt,
+                 max_attempts);
+        free(payload);
+        return ESP_OK;
     }
 
-    if (!wav_header_seems_valid(body.data, body.len)) {
-        ESP_LOGE(TAG, "Groq TTS returned non-WAV payload (%u bytes)", (unsigned)body.len);
-        bin_buf_free(&body);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    *out_wav = body.data;
-    *out_len = body.len;
-    ESP_LOGI(TAG, "Groq TTS OK: %u bytes WAV", (unsigned)body.len);
-    return ESP_OK;
+    free(payload);
+    return ESP_ERR_HTTP_INCOMPLETE_DATA;
 }

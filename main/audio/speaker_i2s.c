@@ -324,7 +324,7 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len, int64_t deadl
         }
         written += out;
 
-        if (written >= next_log || written == len) {
+        if (len >= SPEAKER_PROGRESS_LOG_STEP && (written >= next_log || written == len)) {
             ESP_LOGI(TAG, "PCM stereo progress %u/%u", (unsigned)written, (unsigned)len);
             next_log += SPEAKER_PROGRESS_LOG_STEP;
         }
@@ -407,7 +407,7 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len, int64_t deadl
         }
 
         offset += take;
-        if (offset >= next_log || offset == len) {
+        if (len >= SPEAKER_PROGRESS_LOG_STEP && (offset >= next_log || offset == len)) {
             ESP_LOGI(TAG, "PCM stereo(scaled) progress %u/%u", (unsigned)offset, (unsigned)len);
             next_log += SPEAKER_PROGRESS_LOG_STEP;
         }

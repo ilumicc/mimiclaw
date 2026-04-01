@@ -123,6 +123,8 @@
 #define MIMI_TTS_STACK               (10 * 1024)
 #define MIMI_TTS_PRIO                5
 #define MIMI_TTS_CORE                0
+#define MIMI_TTS_HTTP_RETRY_COUNT   2
+
 
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"
