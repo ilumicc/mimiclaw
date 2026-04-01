@@ -23,6 +23,7 @@ typedef struct {
 
 static i2s_chan_handle_t s_tx = NULL;
 static bool s_initialized = false;
+static bool s_channel_enabled = false;
 
 static uint16_t rd_le16(const uint8_t *p)
 {
@@ -112,7 +113,7 @@ esp_err_t speaker_i2s_init(void)
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(24000),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
             .bclk = MIMI_SPK_I2S_BCLK_GPIO,
@@ -135,15 +136,8 @@ esp_err_t speaker_i2s_init(void)
         return err;
     }
 
-    err = i2s_channel_enable(s_tx);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2s_channel_enable failed: %s", esp_err_to_name(err));
-        i2s_del_channel(s_tx);
-        s_tx = NULL;
-        return err;
-    }
-
     s_initialized = true;
+    s_channel_enabled = false;
     ESP_LOGI(TAG, "I2S speaker ready (WS=%d BCLK=%d DOUT=%d)",
              MIMI_SPK_I2S_WS_GPIO, MIMI_SPK_I2S_BCLK_GPIO, MIMI_SPK_I2S_DOUT_GPIO);
     return ESP_OK;
@@ -156,19 +150,26 @@ bool speaker_i2s_is_initialized(void)
 
 static esp_err_t speaker_reconfig_clock(uint32_t sample_rate)
 {
-    esp_err_t err = i2s_channel_disable(s_tx);
-    if (err != ESP_OK) {
-        return err;
+    esp_err_t err;
+    if (s_channel_enabled) {
+        err = i2s_channel_disable(s_tx);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            return err;
+        }
+        s_channel_enabled = false;
     }
 
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
     err = i2s_channel_reconfig_std_clock(s_tx, &clk_cfg);
     if (err != ESP_OK) {
-        i2s_channel_enable(s_tx);
         return err;
     }
 
-    return i2s_channel_enable(s_tx);
+    err = i2s_channel_enable(s_tx);
+    if (err == ESP_OK) {
+        s_channel_enabled = true;
+    }
+    return err;
 }
 
 static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
@@ -227,6 +228,28 @@ static esp_err_t write_pcm_mono_dup(const uint8_t *data, size_t len)
     return ESP_OK;
 }
 
+static void speaker_stop_output(void)
+{
+    if (!s_tx || !s_channel_enabled) {
+        return;
+    }
+
+    uint8_t silence[512] = {0};
+    size_t out = 0;
+    esp_err_t wr = i2s_channel_write(s_tx, silence, sizeof(silence), &out, pdMS_TO_TICKS(200));
+    if (wr != ESP_OK) {
+        ESP_LOGD(TAG, "Silence flush failed: %s", esp_err_to_name(wr));
+    }
+
+    esp_err_t dis = i2s_channel_disable(s_tx);
+    if (dis != ESP_OK && dis != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "i2s_channel_disable failed: %s", esp_err_to_name(dis));
+        return;
+    }
+
+    s_channel_enabled = false;
+}
+
 esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
 {
     if (!wav_data || wav_len == 0) {
@@ -278,5 +301,6 @@ esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
                  (unsigned)meta.data_len);
     }
 
+    speaker_stop_output();
     return err;
 }
