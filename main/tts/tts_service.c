@@ -14,6 +14,7 @@
 #include "mimi_config.h"
 #include "tts/groq_tts_client.h"
 #include "audio/speaker_i2s.h"
+#include "voice/wake_service.h"
 
 typedef struct {
     char text[MIMI_TTS_MAX_TEXT_LEN + 1];
@@ -56,7 +57,17 @@ static void tts_worker_task(void *arg)
             continue;
         }
 
+        esp_err_t wake_pause_err = wake_service_pause("tts_playback");
+        if (wake_pause_err != ESP_OK) {
+            ESP_LOGW(TAG, "Wake pause failed before playback: %s", esp_err_to_name(wake_pause_err));
+        }
+
         err = speaker_i2s_play_wav(wav, wav_len);
+
+        esp_err_t wake_resume_err = wake_service_resume("tts_playback");
+        if (wake_resume_err != ESP_OK) {
+            ESP_LOGW(TAG, "Wake resume failed after playback: %s", esp_err_to_name(wake_resume_err));
+        }
         free(wav);
 
         if (err != ESP_OK) {

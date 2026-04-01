@@ -14,10 +14,13 @@
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
 #include "voice/voice_channel.h"
+#include "voice/wake_service.h"
+#include "voice/voice_session_coordinator.h"
 #include "tts/tts_service.h"
 #include "tts/groq_tts_client.h"
 #include "audio/speaker_i2s.h"
 
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -595,7 +598,104 @@ static int cmd_speaker_stats(int argc, char **argv)
     return 0;
 }
 
+/* --- wake_enable command --- */
+static int cmd_wake_enable(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
 
+    esp_err_t err = wake_service_set_enabled(true);
+    printf("wake_enable status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- wake_disable command --- */
+static int cmd_wake_disable(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = wake_service_set_enabled(false);
+    printf("wake_disable status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- wake_cooldown command --- */
+static struct {
+    struct arg_int *ms;
+    struct arg_end *end;
+} wake_cooldown_args;
+
+static int cmd_wake_cooldown(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&wake_cooldown_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, wake_cooldown_args.end, argv[0]);
+        return 1;
+    }
+
+    int value = wake_cooldown_args.ms->ival[0];
+    if (value <= 0) {
+        printf("wake_cooldown expects positive milliseconds\n");
+        return 1;
+    }
+
+    esp_err_t err = wake_service_set_cooldown_ms((uint32_t)value);
+    printf("wake_cooldown status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+
+/* --- wake_test command --- */
+static int cmd_wake_test(int argc, char **argv)
+{
+    const char *phrase = (argc >= 2) ? argv[1] : "wake_test";
+    esp_err_t err = wake_service_notify_detected("cli", phrase);
+    printf("wake_test status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- wake_stats command --- */
+static int cmd_wake_stats(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    wake_service_stats_t wake = {0};
+    esp_err_t wake_err = wake_service_get_stats(&wake);
+    if (wake_err != ESP_OK) {
+        printf("wake_stats status: %s\n", esp_err_to_name(wake_err));
+        return 1;
+    }
+
+    printf("wake: enabled=%s paused=%s cooldown=%ums hit=%u cb=%u suppress(dis=%u pause=%u cd=%u) last_src=%s last_age=%ums\n",
+           wake.enabled ? "yes" : "no",
+           wake.paused ? "yes" : "no",
+           (unsigned)wake.cooldown_ms,
+           (unsigned)wake.wake_detected,
+           (unsigned)wake.callbacks_fired,
+           (unsigned)wake.suppressed_disabled,
+           (unsigned)wake.suppressed_paused,
+           (unsigned)wake.suppressed_cooldown,
+           wake.last_source[0] ? wake.last_source : "-",
+           (unsigned)wake.last_wake_age_ms);
+
+    voice_session_stats_t sess = {0};
+    esp_err_t sess_err = voice_session_coordinator_get_stats(&sess);
+    if (sess_err == ESP_OK) {
+        printf("voice_session: state=%s wake=%u start=%u ready=%u timeout=%u last_ms=%u\n",
+               voice_session_coordinator_state_str(sess.state),
+               (unsigned)sess.wake_hits,
+               (unsigned)sess.sessions_started,
+               (unsigned)sess.sessions_ready,
+               (unsigned)sess.sessions_timeout,
+               (unsigned)sess.last_session_ms);
+    } else {
+        printf("voice_session: %s\n", esp_err_to_name(sess_err));
+    }
+
+    return 0;
+}
 
 /* --- wifi_scan command --- */
 static int cmd_wifi_scan(int argc, char **argv)
@@ -805,6 +905,31 @@ static void print_config(const char *label, const char *ns, const char *key,
     }
 }
 
+static void print_config_u8(const char *label, const char *ns, const char *key,
+                            uint8_t build_val)
+{
+    char nvs_val[16] = {0};
+    char build_buf[16] = {0};
+    const char *source = "build";
+    const char *display = build_buf;
+
+    snprintf(build_buf, sizeof(build_buf), "%u", (unsigned)build_val);
+
+    nvs_handle_t nvs;
+    if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
+        uint8_t value = 0;
+        if (nvs_get_u8(nvs, key, &value) == ESP_OK) {
+            snprintf(nvs_val, sizeof(nvs_val), "%u", (unsigned)value);
+            source = "NVS";
+            display = nvs_val;
+        }
+        nvs_close(nvs);
+    }
+
+    printf("  %-14s: %s  [%s]\n", label, display, source);
+}
+
+
 static void print_config_u16(const char *label, const char *ns, const char *key,
                              const char *build_val)
 {
@@ -833,6 +958,12 @@ static void print_config_u16(const char *label, const char *ns, const char *key,
 
 static int cmd_config_show(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
+
+    char wake_cd_build[16] = {0};
+    snprintf(wake_cd_build, sizeof(wake_cd_build), "%u", (unsigned)MIMI_WAKE_COOLDOWN_MS);
+
     printf("=== Current Configuration ===\n");
     print_config("WiFi SSID",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_SSID,     MIMI_SECRET_WIFI_SSID,  false);
     print_config("WiFi Pass",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_PASS,     MIMI_SECRET_WIFI_PASS,  true);
@@ -847,6 +978,8 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Voice WS URL", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_URL, MIMI_SECRET_VOICE_WS_URL, false);
     print_config("Voice Token", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_TOKEN, MIMI_SECRET_VOICE_WS_TOKEN, true);
     print_config("Voice Version", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_VER, MIMI_SECRET_VOICE_WS_VERSION, false);
+    print_config_u8("Wake Enabled", MIMI_NVS_VOICE, MIMI_NVS_KEY_WAKE_ENABLED, MIMI_WAKE_ENABLED_DEFAULT);
+    print_config_u16("Wake Cooldown", MIMI_NVS_VOICE, MIMI_NVS_KEY_WAKE_COOLDOWN_MS, wake_cd_build);
     print_config("Groq Key", MIMI_NVS_TTS, MIMI_NVS_KEY_GROQ_API_KEY, MIMI_SECRET_GROQ_API_KEY, true);
     print_config("TTS Model", MIMI_NVS_TTS, MIMI_NVS_KEY_TTS_MODEL, MIMI_SECRET_TTS_MODEL, false);
     print_config("TTS Voice", MIMI_NVS_TTS, MIMI_NVS_KEY_TTS_VOICE, MIMI_SECRET_TTS_VOICE, false);
@@ -1393,6 +1526,48 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&speaker_stats_cmd);
 
+    /* wake_enable */
+    esp_console_cmd_t wake_enable_cmd = {
+        .command = "wake_enable",
+        .help = "Enable local wake detection pipeline",
+        .func = &cmd_wake_enable,
+    };
+    esp_console_cmd_register(&wake_enable_cmd);
+
+    /* wake_disable */
+    esp_console_cmd_t wake_disable_cmd = {
+        .command = "wake_disable",
+        .help = "Disable local wake detection pipeline",
+        .func = &cmd_wake_disable,
+    };
+    esp_console_cmd_register(&wake_disable_cmd);
+
+    /* wake_cooldown */
+    wake_cooldown_args.ms = arg_int1(NULL, NULL, "<ms>", "Wake cooldown in milliseconds");
+    wake_cooldown_args.end = arg_end(1);
+    esp_console_cmd_t wake_cooldown_cmd = {
+        .command = "wake_cooldown",
+        .help = "Set wake trigger cooldown in ms",
+        .func = &cmd_wake_cooldown,
+        .argtable = &wake_cooldown_args,
+    };
+    esp_console_cmd_register(&wake_cooldown_cmd);
+
+    /* wake_stats */
+    esp_console_cmd_t wake_stats_cmd = {
+        .command = "wake_stats",
+        .help = "Show wake/session counters and runtime state",
+        .func = &cmd_wake_stats,
+    };
+    esp_console_cmd_register(&wake_stats_cmd);
+
+    /* wake_test */
+    esp_console_cmd_t wake_test_cmd = {
+        .command = "wake_test",
+        .help = "Inject a test wake event: wake_test [phrase]",
+        .func = &cmd_wake_test,
+    };
+    esp_console_cmd_register(&wake_test_cmd);
 
     esp_console_cmd_register(&tavily_key_cmd);
 

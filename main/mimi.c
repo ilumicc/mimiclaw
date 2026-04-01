@@ -27,6 +27,8 @@
 #include "skills/skill_loader.h"
 #include "onboard/wifi_onboard.h"
 #include "voice/voice_channel.h"
+#include "voice/wake_service.h"
+#include "voice/voice_session_coordinator.h"
 #include "tts/tts_service.h"
 
 static const char *TAG = "mimi";
@@ -144,6 +146,8 @@ void app_main(void)
     ESP_ERROR_CHECK(heartbeat_init());
     ESP_ERROR_CHECK(agent_loop_init());
     ESP_ERROR_CHECK(voice_channel_init());
+    ESP_ERROR_CHECK(wake_service_init());
+    ESP_ERROR_CHECK(voice_session_coordinator_init());
     ESP_ERROR_CHECK(tts_service_init());
 
     /* Start Serial CLI first (works without WiFi) */

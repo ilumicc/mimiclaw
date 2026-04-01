@@ -14,6 +14,8 @@
 
 #include "mimi_config.h"
 #include "bus/message_bus.h"
+#include "voice/wake_service.h"
+#include "voice/voice_session_coordinator.h"
 
 static const char *TAG = "voice";
 
@@ -193,9 +195,22 @@ static void handle_json_message(const char *payload)
         if (final_flag && cJSON_IsString(text) && text->valuestring[0]) {
             push_stt_to_inbound(cJSON_IsString(chat_id) ? chat_id->valuestring : NULL,
                                 text->valuestring);
+            voice_session_coordinator_on_transcript_final(text->valuestring);
         }
     } else if (strcmp(type->valuestring, "wake") == 0) {
-        ESP_LOGI(TAG, "Wake event received");
+        cJSON *keyword = cJSON_GetObjectItem(root, "keyword");
+        if (!cJSON_IsString(keyword)) {
+            keyword = cJSON_GetObjectItem(root, "text");
+        }
+        if (!cJSON_IsString(keyword)) {
+            keyword = cJSON_GetObjectItem(root, "content");
+        }
+
+        const char *phrase = cJSON_IsString(keyword) ? keyword->valuestring : "wake";
+        esp_err_t wake_err = wake_service_notify_detected("voice_ws", phrase);
+        if (wake_err != ESP_OK) {
+            ESP_LOGW(TAG, "Wake event ignored: %s", esp_err_to_name(wake_err));
+        }
     } else if (strcmp(type->valuestring, "error") == 0) {
         cJSON *message = cJSON_GetObjectItem(root, "message");
         ESP_LOGW(TAG, "Voice server error: %s", cJSON_IsString(message) ? message->valuestring : "unknown");

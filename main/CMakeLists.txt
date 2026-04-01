@@ -25,6 +25,8 @@ idf_component_register(
         "skills/skill_loader.c"
         "onboard/wifi_onboard.c"
         "voice/voice_channel.c"
+        "voice/wake_service.c"
+        "voice/voice_session_coordinator.c"
         "tts/groq_tts_client.c"
         "tts/tts_service.c"
         "audio/speaker_i2s.c"

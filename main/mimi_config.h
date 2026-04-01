@@ -126,6 +126,14 @@
 #define MIMI_TTS_HTTP_RETRY_COUNT   2
 #define MIMI_TTS_HTTP_RETRY_BACKOFF_MS 250
 
+/* Wake / Voice Session */
+#define MIMI_WAKE_ENABLED_DEFAULT    1
+#define MIMI_WAKE_COOLDOWN_MS        3500
+#define MIMI_VOICE_LISTEN_TIMEOUT_MS 7000
+#define MIMI_VOICE_SESSION_STACK     (6 * 1024)
+#define MIMI_VOICE_SESSION_PRIO      4
+#define MIMI_VOICE_SESSION_CORE      0
+
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"
 #define MIMI_SPIFFS_CONFIG_DIR       MIMI_SPIFFS_BASE "/config"
@@ -194,6 +202,8 @@
 #define MIMI_NVS_KEY_VOICE_WS_URL    "voice_ws_url"
 #define MIMI_NVS_KEY_VOICE_WS_TOKEN  "voice_ws_token"
 #define MIMI_NVS_KEY_VOICE_WS_VER    "voice_ws_ver"
+#define MIMI_NVS_KEY_WAKE_ENABLED    "wake_enabled"
+#define MIMI_NVS_KEY_WAKE_COOLDOWN_MS "wake_cd_ms"
 #define MIMI_NVS_KEY_GROQ_API_KEY    "groq_key"
 #define MIMI_NVS_KEY_TTS_MODEL       "tts_model"
 #define MIMI_NVS_KEY_TTS_VOICE       "tts_voice"
