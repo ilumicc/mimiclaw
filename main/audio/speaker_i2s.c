@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "esp_log.h"
 #include "driver/i2s_std.h"
@@ -25,6 +26,9 @@ typedef struct {
 static i2s_chan_handle_t s_tx = NULL;
 static bool s_initialized = false;
 static bool s_channel_enabled = false;
+static volatile bool s_abort_requested = false;
+static SemaphoreHandle_t s_lock = NULL;
+static speaker_i2s_stats_t s_stats = {0};
 
 static void speaker_set_sd(bool enabled)
 {
@@ -34,6 +38,30 @@ static void speaker_set_sd(bool enabled)
 #else
     (void)enabled;
 #endif
+}
+
+static SemaphoreHandle_t speaker_get_lock(void)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutex();
+    }
+    return s_lock;
+}
+
+static bool speaker_lock_take(TickType_t ticks)
+{
+    SemaphoreHandle_t lock = speaker_get_lock();
+    if (!lock) {
+        return false;
+    }
+    return xSemaphoreTake(lock, ticks) == pdTRUE;
+}
+
+static void speaker_lock_give(void)
+{
+    if (s_lock) {
+        xSemaphoreGive(s_lock);
+    }
 }
 
 
@@ -203,18 +231,33 @@ static inline int16_t speaker_attenuate_sample(int16_t sample)
 #endif
 }
 
+static bool speaker_should_abort(void)
+{
+    return s_abort_requested;
+}
+
+
+
 static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
 {
 #if MIMI_SPK_PCM_ATTENUATION <= 1
     size_t written = 0;
     while (written < len) {
+        if (speaker_should_abort()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
         size_t out = 0;
-        esp_err_t err = i2s_channel_write(s_tx, data + written, len - written,
-                                          &out, pdMS_TO_TICKS(2000));
+        esp_err_t err = i2s_channel_write(s_tx,
+                                          data + written,
+                                          len - written,
+                                          &out,
+                                          pdMS_TO_TICKS(MIMI_SPK_I2S_WRITE_TIMEOUT_MS));
         if (err != ESP_OK) {
             return err;
         }
         if (out == 0) {
+            s_stats.write_timeouts++;
             return ESP_ERR_TIMEOUT;
         }
         written += out;
@@ -229,6 +272,11 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
 
     size_t offset = 0;
     while (offset < len) {
+        if (speaker_should_abort()) {
+            free(scaled);
+            return ESP_ERR_INVALID_STATE;
+        }
+
         size_t take = len - offset;
         if (take > chunk_bytes) {
             take = chunk_bytes;
@@ -248,17 +296,23 @@ static esp_err_t write_pcm_stereo(const uint8_t *data, size_t len)
 
         size_t written = 0;
         while (written < take) {
+            if (speaker_should_abort()) {
+                free(scaled);
+                return ESP_ERR_INVALID_STATE;
+            }
+
             size_t out = 0;
             esp_err_t err = i2s_channel_write(s_tx,
                                               ((const uint8_t *)scaled) + written,
                                               take - written,
                                               &out,
-                                              pdMS_TO_TICKS(2000));
+                                              pdMS_TO_TICKS(MIMI_SPK_I2S_WRITE_TIMEOUT_MS));
             if (err != ESP_OK) {
                 free(scaled);
                 return err;
             }
             if (out == 0) {
+                s_stats.write_timeouts++;
                 free(scaled);
                 return ESP_ERR_TIMEOUT;
             }
@@ -360,6 +414,7 @@ static void speaker_stop_output(void)
     }
 
     s_initialized = false;
+    s_stats.is_playing = false;
     speaker_force_gpio_idle();
 }
 
@@ -369,57 +424,118 @@ esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t err = speaker_i2s_init();
-    if (err != ESP_OK) {
-        return err;
+    if (!speaker_lock_take(pdMS_TO_TICKS(200))) {
+        return ESP_ERR_TIMEOUT;
     }
 
-    wav_meta_t meta;
-    err = parse_wav_header(wav_data, wav_len, &meta);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Invalid WAV: %s", esp_err_to_name(err));
-        speaker_stop_output();
-        return err;
-    }
+    s_stats.play_requests++;
+    s_stats.is_playing = true;
+    s_abort_requested = false;
 
-    if (meta.audio_format != 1 || meta.bits_per_sample != 16) {
-        ESP_LOGE(TAG, "Unsupported WAV format: audio_format=%u bits=%u",
-                 (unsigned)meta.audio_format, (unsigned)meta.bits_per_sample);
-        speaker_stop_output();
-        return ESP_ERR_NOT_SUPPORTED;
-    }
+    esp_err_t err = ESP_OK;
+    wav_meta_t meta = {0};
 
-    if (meta.data_offset + meta.data_len > wav_len) {
-        speaker_stop_output();
-        return ESP_ERR_INVALID_SIZE;
-    }
+    do {
+        err = speaker_i2s_init();
+        if (err != ESP_OK) {
+            break;
+        }
 
-    err = speaker_reconfig_clock(meta.sample_rate);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "I2S clock reconfig failed: %s", esp_err_to_name(err));
-        speaker_stop_output();
-        return err;
-    }
+        err = parse_wav_header(wav_data, wav_len, &meta);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Invalid WAV: %s", esp_err_to_name(err));
+            break;
+        }
 
-    speaker_set_sd(true);
+        if (meta.audio_format != 1 || meta.bits_per_sample != 16) {
+            ESP_LOGE(TAG, "Unsupported WAV format: audio_format=%u bits=%u",
+                     (unsigned)meta.audio_format, (unsigned)meta.bits_per_sample);
+            err = ESP_ERR_NOT_SUPPORTED;
+            break;
+        }
 
-    const uint8_t *pcm = wav_data + meta.data_offset;
-    if (meta.channels == 2) {
-        err = write_pcm_stereo(pcm, meta.data_len);
+        if (meta.data_offset + meta.data_len > wav_len) {
+            err = ESP_ERR_INVALID_SIZE;
+            break;
+        }
+
+        s_stats.last_sample_rate = meta.sample_rate;
+        s_stats.last_channels = meta.channels;
+        s_stats.last_bits_per_sample = meta.bits_per_sample;
+        s_stats.last_data_len = meta.data_len;
+
+        err = speaker_reconfig_clock(meta.sample_rate);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "I2S clock reconfig failed: %s", esp_err_to_name(err));
+            break;
+        }
+
+        speaker_set_sd(true);
+
+        const uint8_t *pcm = wav_data + meta.data_offset;
+        if (meta.channels == 2) {
+            err = write_pcm_stereo(pcm, meta.data_len);
+        } else {
+            err = write_pcm_mono_dup(pcm, meta.data_len);
+        }
+
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Playback OK (%u Hz, %u ch, %u bits, %u bytes)",
+                     (unsigned)meta.sample_rate,
+                     (unsigned)meta.channels,
+                     (unsigned)meta.bits_per_sample,
+                     (unsigned)meta.data_len);
+        }
+    } while (0);
+
+    if (err == ESP_OK) {
+        s_stats.play_ok++;
     } else {
-        err = write_pcm_mono_dup(pcm, meta.data_len);
-    }
-
-    if (err != ESP_OK) {
+        s_stats.play_fail++;
         ESP_LOGE(TAG, "I2S playback failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "Playback OK (%u Hz, %u ch, %u bits, %u bytes)",
-                 (unsigned)meta.sample_rate,
-                 (unsigned)meta.channels,
-                 (unsigned)meta.bits_per_sample,
-                 (unsigned)meta.data_len);
+    }
+
+    s_stats.last_error = err;
+    speaker_stop_output();
+    s_abort_requested = false;
+    speaker_lock_give();
+    return err;
+}
+
+esp_err_t speaker_i2s_request_stop(void)
+{
+    s_abort_requested = true;
+    s_stats.abort_requests++;
+    return ESP_OK;
+}
+
+esp_err_t speaker_i2s_stop(void)
+{
+    s_stats.stop_requests++;
+    s_abort_requested = true;
+
+    if (!speaker_lock_take(pdMS_TO_TICKS(300))) {
+        return ESP_ERR_TIMEOUT;
     }
 
     speaker_stop_output();
-    return err;
+    s_abort_requested = false;
+    s_stats.last_error = ESP_OK;
+    speaker_lock_give();
+    return ESP_OK;
+}
+
+esp_err_t speaker_i2s_get_stats(speaker_i2s_stats_t *out)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!speaker_lock_take(pdMS_TO_TICKS(100))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    *out = s_stats;
+    speaker_lock_give();
+    return ESP_OK;
 }

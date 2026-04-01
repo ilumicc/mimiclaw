@@ -16,6 +16,7 @@
 #include "voice/voice_channel.h"
 #include "tts/tts_service.h"
 #include "tts/groq_tts_client.h"
+#include "audio/speaker_i2s.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -529,6 +530,68 @@ static int cmd_tts_diag(int argc, char **argv)
     }
 
     printf("TTS: %s\n", diag);
+    return 0;
+}
+
+/* --- tts_stop command --- */
+static int cmd_tts_stop(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = tts_service_stop_current();
+    printf("tts_stop status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- tts_flush command --- */
+static int cmd_tts_flush(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = tts_service_flush_queue();
+    printf("tts_flush status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- speaker_stop command --- */
+static int cmd_speaker_stop(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = speaker_i2s_stop();
+    printf("speaker_stop status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- speaker_stats command --- */
+static int cmd_speaker_stats(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    speaker_i2s_stats_t st = {0};
+    esp_err_t err = speaker_i2s_get_stats(&st);
+    if (err != ESP_OK) {
+        printf("speaker_stats status: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("speaker: playing=%s req=%u ok=%u fail=%u stop=%u abort=%u timeout=%u last=%s %uHz %uch %ubit %ubytes\n",
+           st.is_playing ? "yes" : "no",
+           (unsigned)st.play_requests,
+           (unsigned)st.play_ok,
+           (unsigned)st.play_fail,
+           (unsigned)st.stop_requests,
+           (unsigned)st.abort_requests,
+           (unsigned)st.write_timeouts,
+           esp_err_to_name(st.last_error),
+           (unsigned)st.last_sample_rate,
+           (unsigned)st.last_channels,
+           (unsigned)st.last_bits_per_sample,
+           (unsigned)st.last_data_len);
     return 0;
 }
 
@@ -1297,6 +1360,39 @@ esp_err_t serial_cli_init(void)
         .argtable = &voice_version_args,
     };
     esp_console_cmd_register(&voice_version_cmd);
+
+    /* tts_stop */
+    esp_console_cmd_t tts_stop_cmd = {
+        .command = "tts_stop",
+        .help = "Request stop for current TTS playback",
+        .func = &cmd_tts_stop,
+    };
+    esp_console_cmd_register(&tts_stop_cmd);
+
+    /* tts_flush */
+    esp_console_cmd_t tts_flush_cmd = {
+        .command = "tts_flush",
+        .help = "Flush queued TTS items and stop current playback",
+        .func = &cmd_tts_flush,
+    };
+    esp_console_cmd_register(&tts_flush_cmd);
+
+    /* speaker_stop */
+    esp_console_cmd_t speaker_stop_cmd = {
+        .command = "speaker_stop",
+        .help = "Force-stop speaker output immediately",
+        .func = &cmd_speaker_stop,
+    };
+    esp_console_cmd_register(&speaker_stop_cmd);
+
+    /* speaker_stats */
+    esp_console_cmd_t speaker_stats_cmd = {
+        .command = "speaker_stats",
+        .help = "Show speaker runtime counters and last playback metadata",
+        .func = &cmd_speaker_stats,
+    };
+    esp_console_cmd_register(&speaker_stats_cmd);
+
 
     esp_console_cmd_register(&tavily_key_cmd);
 

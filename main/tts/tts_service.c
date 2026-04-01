@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,6 +24,11 @@ static const char *TAG = "tts_service";
 static QueueHandle_t s_queue = NULL;
 static TaskHandle_t s_worker = NULL;
 static bool s_ready = false;
+static uint32_t s_enqueued = 0;
+static uint32_t s_spoken = 0;
+static uint32_t s_synth_fail = 0;
+static uint32_t s_play_fail = 0;
+static uint32_t s_drop_full = 0;
 
 static void tts_worker_task(void *arg)
 {
@@ -44,6 +50,7 @@ static void tts_worker_task(void *arg)
 
         esp_err_t err = groq_tts_synthesize_wav(req.text, &wav, &wav_len);
         if (err != ESP_OK) {
+            s_synth_fail++;
             ESP_LOGW(TAG, "Synthesis failed: %s", esp_err_to_name(err));
             free(wav);
             continue;
@@ -53,10 +60,12 @@ static void tts_worker_task(void *arg)
         free(wav);
 
         if (err != ESP_OK) {
+            s_play_fail++;
             ESP_LOGW(TAG, "Playback failed: %s", esp_err_to_name(err));
             continue;
         }
 
+        s_spoken++;
         ESP_LOGI(TAG, "Spoken %u chars", (unsigned)strlen(req.text));
     }
 }
@@ -128,12 +137,36 @@ esp_err_t tts_service_enqueue_text(const char *text)
     req.text[n] = '\0';
 
     if (xQueueSend(s_queue, &req, 0) != pdTRUE) {
+        s_drop_full++;
         ESP_LOGW(TAG, "TTS queue full (len=%u), dropping text", (unsigned)strlen(req.text));
         return ESP_ERR_NO_MEM;
     }
 
+    s_enqueued++;
     return ESP_OK;
 }
+
+esp_err_t tts_service_stop_current(void)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return speaker_i2s_request_stop();
+}
+
+esp_err_t tts_service_flush_queue(void)
+{
+    if (!s_ready || !s_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    tts_req_t req;
+    while (xQueueReceive(s_queue, &req, 0) == pdTRUE) {
+    }
+
+    return speaker_i2s_request_stop();
+}
+
 
 bool tts_service_is_ready(void)
 {
@@ -152,16 +185,26 @@ esp_err_t tts_service_diag(char *buf, size_t buf_size)
     }
 
     UBaseType_t queued = s_queue ? uxQueueMessagesWaiting(s_queue) : 0;
+    speaker_i2s_stats_t spk = {0};
+    esp_err_t spk_err = speaker_i2s_get_stats(&spk);
+
     snprintf(buf, buf_size,
-             "ready=%s configured=%s queue=%u/%d worker=%s model=%s voice=%s speaker_init=%s",
+             "ready=%s configured=%s queue=%u/%d worker=%s enq=%u spoken=%u synth_fail=%u play_fail=%u drop=%u model=%s voice=%s spk_play=%s spk_timeout=%u spk_last=%s",
              s_ready ? "yes" : "no",
              groq_tts_is_configured() ? "yes" : "no",
              (unsigned)queued,
              MIMI_TTS_QUEUE_LEN,
              s_worker ? "yes" : "no",
+             (unsigned)s_enqueued,
+             (unsigned)s_spoken,
+             (unsigned)s_synth_fail,
+             (unsigned)s_play_fail,
+             (unsigned)s_drop_full,
              groq_tts_get_model(),
              groq_tts_get_voice(),
-             speaker_i2s_is_initialized() ? "yes" : "no");
+             (spk_err == ESP_OK && spk.is_playing) ? "yes" : "no",
+             (spk_err == ESP_OK) ? (unsigned)spk.write_timeouts : 0,
+             (spk_err == ESP_OK) ? esp_err_to_name(spk.last_error) : esp_err_to_name(spk_err));
 
     return ESP_OK;
 }
