@@ -156,7 +156,7 @@
 #define MIMI_SPK_I2S_WS_GPIO         16
 #define MIMI_SPK_I2S_BCLK_GPIO       15
 #define MIMI_SPK_I2S_DOUT_GPIO       17
-#define MIMI_SPK_SD_GPIO             -1  /* set to board SD/EN pin, -1 to disable */
+#define MIMI_SPK_SD_GPIO             18  /* MAX98357A SD/EN pin */
 #define MIMI_SPK_SD_ACTIVE_LEVEL     1
 #define MIMI_SPK_PCM_ATTENUATION     1   /* 1=no attenuation, 2=-6dB, 4=-12dB */
 
