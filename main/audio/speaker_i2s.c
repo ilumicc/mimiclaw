@@ -102,12 +102,13 @@ static esp_err_t parse_wav_header(const uint8_t *wav, size_t len, wav_meta_t *me
         const uint8_t *chunk = wav + pos;
         uint32_t chunk_size = rd_le32(chunk + 4);
         size_t payload = pos + 8;
-        size_t next = payload + chunk_size;
-        if (next > len) {
-            return ESP_ERR_INVALID_SIZE;
-        }
+        uint64_t next64 = (uint64_t)payload + (uint64_t)chunk_size;
+        bool chunk_fits = next64 <= (uint64_t)len;
 
         if (memcmp(chunk, "fmt ", 4) == 0) {
+            if (!chunk_fits) {
+                return ESP_ERR_INVALID_SIZE;
+            }
             if (chunk_size < 16) {
                 return ESP_ERR_INVALID_RESPONSE;
             }
@@ -117,8 +118,19 @@ static esp_err_t parse_wav_header(const uint8_t *wav, size_t len, wav_meta_t *me
             meta->bits_per_sample = rd_le16(wav + payload + 14);
             have_fmt = true;
         } else if (memcmp(chunk, "data", 4) == 0) {
+            if (payload >= len) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+
             meta->data_offset = payload;
-            meta->data_len = chunk_size;
+            if (chunk_size == 0xFFFFFFFFU || !chunk_fits) {
+                meta->data_len = len - payload;
+                ESP_LOGW(TAG, "WAV data chunk size=%u, clamped to %u bytes",
+                         (unsigned)chunk_size,
+                         (unsigned)meta->data_len);
+            } else {
+                meta->data_len = (size_t)chunk_size;
+            }
             have_data = true;
         }
 
@@ -126,6 +138,11 @@ static esp_err_t parse_wav_header(const uint8_t *wav, size_t len, wav_meta_t *me
             break;
         }
 
+        if (!chunk_fits) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        size_t next = (size_t)next64;
         pos = next + (chunk_size % 2);
     }
 
@@ -550,7 +567,7 @@ esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
             break;
         }
 
-        if (meta.data_offset + meta.data_len > wav_len) {
+        if (meta.data_offset >= wav_len || meta.data_len > (wav_len - meta.data_offset)) {
             err = ESP_ERR_INVALID_SIZE;
             break;
         }
