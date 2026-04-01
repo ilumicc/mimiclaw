@@ -26,6 +26,17 @@ static i2s_chan_handle_t s_tx = NULL;
 static bool s_initialized = false;
 static bool s_channel_enabled = false;
 
+static void speaker_set_sd(bool enabled)
+{
+#if MIMI_SPK_SD_GPIO >= 0
+    gpio_set_level((gpio_num_t)MIMI_SPK_SD_GPIO,
+                   enabled ? MIMI_SPK_SD_ACTIVE_LEVEL : (1 - MIMI_SPK_SD_ACTIVE_LEVEL));
+#else
+    (void)enabled;
+#endif
+}
+
+
 static uint16_t rd_le16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -137,12 +148,19 @@ esp_err_t speaker_i2s_init(void)
         return err;
     }
 
+#if MIMI_SPK_SD_GPIO >= 0
+    gpio_reset_pin((gpio_num_t)MIMI_SPK_SD_GPIO);
+    gpio_set_direction((gpio_num_t)MIMI_SPK_SD_GPIO, GPIO_MODE_OUTPUT);
+    speaker_set_sd(false);
+#endif
+
     s_initialized = true;
     s_channel_enabled = false;
-    ESP_LOGI(TAG, "I2S speaker ready (WS=%d BCLK=%d DOUT=%d, attn=%dx)",
+    ESP_LOGI(TAG, "I2S speaker ready (WS=%d BCLK=%d DOUT=%d SD=%d attn=%dx)",
              MIMI_SPK_I2S_WS_GPIO,
              MIMI_SPK_I2S_BCLK_GPIO,
              MIMI_SPK_I2S_DOUT_GPIO,
+             MIMI_SPK_SD_GPIO,
              MIMI_SPK_PCM_ATTENUATION);
     return ESP_OK;
 }
@@ -301,6 +319,12 @@ static void speaker_force_gpio_idle(void)
         gpio_set_direction(pins[i], GPIO_MODE_OUTPUT);
         gpio_set_level(pins[i], 0);
     }
+
+#if MIMI_SPK_SD_GPIO >= 0
+    gpio_reset_pin((gpio_num_t)MIMI_SPK_SD_GPIO);
+    gpio_set_direction((gpio_num_t)MIMI_SPK_SD_GPIO, GPIO_MODE_OUTPUT);
+#endif
+    speaker_set_sd(false);
 }
 
 static void speaker_stop_output(void)
@@ -369,6 +393,8 @@ esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
         speaker_stop_output();
         return err;
     }
+
+    speaker_set_sd(true);
 
     const uint8_t *pcm = wav_data + meta.data_offset;
     if (meta.channels == 2) {
