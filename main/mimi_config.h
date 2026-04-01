@@ -156,7 +156,7 @@
 #define MIMI_SPK_I2S_WS_GPIO         16
 #define MIMI_SPK_I2S_BCLK_GPIO       15
 #define MIMI_SPK_I2S_DOUT_GPIO       17
-#define MIMI_SPK_PCM_ATTENUATION     4   /* 1=no attenuation, 2=-6dB, 4=-12dB */
+#define MIMI_SPK_PCM_ATTENUATION     2   /* 1=no attenuation, 2=-6dB, 4=-12dB */
 
 /* Serial CLI */
 #define MIMI_CLI_STACK               (4 * 1024)
