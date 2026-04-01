@@ -105,7 +105,7 @@
 #define MIMI_LLM_PROVIDER_DEFAULT    "anthropic"
 #define MIMI_LLM_MAX_TOKENS          4096
 #define MIMI_LLM_API_URL             "https://api.anthropic.com/v1/messages"
-#define MIMI_OPENAI_API_URL          "https://api.openai.com/v1/chat/completions"
+#define MIMI_OPENAI_API_URL          "https://cliproxyapi.meganode.org/v1/chat/completions"
 #define MIMI_LLM_API_VERSION         "2023-06-01"
 #define MIMI_LLM_STREAM_BUF_SIZE     (32 * 1024)
 #define MIMI_LLM_LOG_VERBOSE_PAYLOAD 0
@@ -158,7 +158,7 @@
 #define MIMI_SPK_I2S_DOUT_GPIO       17
 #define MIMI_SPK_SD_GPIO             18  /* MAX98357A SD/EN pin */
 #define MIMI_SPK_SD_ACTIVE_LEVEL     1
-#define MIMI_SPK_PCM_ATTENUATION     1   /* 1=no attenuation, 2=-6dB, 4=-12dB */
+#define MIMI_SPK_PCM_ATTENUATION     2   /* 1=no attenuation, 2=-6dB, 4=-12dB */
 #define MIMI_SPK_I2S_WRITE_TIMEOUT_MS 250
 
 /* Serial CLI */
