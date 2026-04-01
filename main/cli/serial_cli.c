@@ -462,22 +462,54 @@ static int cmd_set_tts_voice(int argc, char **argv)
 }
 
 /* --- tts_say command --- */
-static struct {
-    struct arg_str *text;
-    struct arg_end *end;
-} tts_say_args;
-
 static int cmd_tts_say(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&tts_say_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, tts_say_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: tts_say <text>\n");
         return 1;
     }
 
-    esp_err_t err = tts_service_enqueue_text(tts_say_args.text->sval[0]);
+    char text[MIMI_TTS_MAX_TEXT_LEN + 1] = {0};
+    size_t used = 0;
+    bool truncated = false;
+
+    for (int i = 1; i < argc; i++) {
+        if (i > 1) {
+            if (used + 1 >= sizeof(text)) {
+                truncated = true;
+                break;
+            }
+            text[used++] = ' ';
+        }
+
+        const char *part = argv[i];
+        size_t part_len = strlen(part);
+        size_t avail = sizeof(text) - 1 - used;
+        if (part_len > avail) {
+            part_len = avail;
+            truncated = true;
+        }
+        memcpy(text + used, part, part_len);
+        used += part_len;
+
+        if (used >= sizeof(text) - 1) {
+            break;
+        }
+    }
+    text[used] = '\0';
+
+    if (text[0] == '\0') {
+        printf("Usage: tts_say <text>\n");
+        return 1;
+    }
+
+    if (truncated) {
+        printf("Warning: text truncated to %u bytes\n", (unsigned)MIMI_TTS_MAX_TEXT_LEN);
+    }
+
+    esp_err_t err = tts_service_enqueue_text(text);
     printf("tts_say status: %s\n", esp_err_to_name(err));
-    if (err != ESP_OK && err == ESP_ERR_INVALID_STATE) {
+    if (err == ESP_ERR_INVALID_STATE) {
         printf("TTS not ready. Ensure WiFi is connected and tts_service is started.\n");
     }
     return (err == ESP_OK) ? 0 : 1;
@@ -1218,13 +1250,10 @@ esp_err_t serial_cli_init(void)
     esp_console_cmd_register(&tts_voice_cmd);
 
     /* tts_say */
-    tts_say_args.text = arg_str1(NULL, NULL, "<text>", "Text to synthesize and play locally");
-    tts_say_args.end = arg_end(1);
     esp_console_cmd_t tts_say_cmd = {
         .command = "tts_say",
-        .help = "Speak text through local MAX98357A speaker",
+        .help = "Speak text through local MAX98357A speaker: tts_say hello world",
         .func = &cmd_tts_say,
-        .argtable = &tts_say_args,
     };
     esp_console_cmd_register(&tts_say_cmd);
 
