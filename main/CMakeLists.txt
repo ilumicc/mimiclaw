@@ -25,10 +25,13 @@ idf_component_register(
         "skills/skill_loader.c"
         "onboard/wifi_onboard.c"
         "voice/voice_channel.c"
+        "tts/groq_tts_client.c"
+        "tts/tts_service.c"
+        "audio/speaker_i2s.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_http_client esp_http_server
         esp_https_ota esp_event json spiffs console vfs app_update esp-tls
-        esp_timer esp_websocket_client esp_driver_gpio
+        esp_timer esp_websocket_client esp_driver_gpio esp_driver_i2s
 )

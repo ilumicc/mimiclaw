@@ -14,6 +14,8 @@
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
 #include "voice/voice_channel.h"
+#include "tts/tts_service.h"
+#include "tts/groq_tts_client.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -398,6 +400,107 @@ static int cmd_set_voice_version(int argc, char **argv)
     return 1;
 }
 
+/* --- set_groq_key command --- */
+static struct {
+    struct arg_str *key;
+    struct arg_end *end;
+} groq_key_args;
+
+static int cmd_set_groq_key(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&groq_key_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, groq_key_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = groq_tts_set_api_key(groq_key_args.key->sval[0]);
+    printf("set_groq_key status: %s\n", esp_err_to_name(err));
+    if (err == ESP_OK) {
+        printf("Groq key saved.\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* --- set_tts_model command --- */
+static struct {
+    struct arg_str *model;
+    struct arg_end *end;
+} tts_model_args;
+
+static int cmd_set_tts_model(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&tts_model_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, tts_model_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = groq_tts_set_model(tts_model_args.model->sval[0]);
+    printf("set_tts_model status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- set_tts_voice command --- */
+static struct {
+    struct arg_str *voice;
+    struct arg_end *end;
+} tts_voice_args;
+
+static int cmd_set_tts_voice(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&tts_voice_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, tts_voice_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = groq_tts_set_voice(tts_voice_args.voice->sval[0]);
+    printf("set_tts_voice status: %s\n", esp_err_to_name(err));
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- tts_say command --- */
+static struct {
+    struct arg_str *text;
+    struct arg_end *end;
+} tts_say_args;
+
+static int cmd_tts_say(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&tts_say_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, tts_say_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = tts_service_enqueue_text(tts_say_args.text->sval[0]);
+    printf("tts_say status: %s\n", esp_err_to_name(err));
+    if (err != ESP_OK && err == ESP_ERR_INVALID_STATE) {
+        printf("TTS not ready. Ensure WiFi is connected and tts_service is started.\n");
+    }
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+/* --- tts_diag command --- */
+static int cmd_tts_diag(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    char diag[256] = {0};
+    esp_err_t err = tts_service_diag(diag, sizeof(diag));
+    if (err != ESP_OK) {
+        printf("tts_diag status: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("TTS: %s\n", diag);
+    return 0;
+}
+
+
 
 /* --- wifi_scan command --- */
 static int cmd_wifi_scan(int argc, char **argv)
@@ -649,6 +752,9 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Voice WS URL", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_URL, MIMI_SECRET_VOICE_WS_URL, false);
     print_config("Voice Token", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_TOKEN, MIMI_SECRET_VOICE_WS_TOKEN, true);
     print_config("Voice Version", MIMI_NVS_VOICE, MIMI_NVS_KEY_VOICE_WS_VER, MIMI_SECRET_VOICE_WS_VERSION, false);
+    print_config("Groq Key", MIMI_NVS_TTS, MIMI_NVS_KEY_GROQ_API_KEY, MIMI_SECRET_GROQ_API_KEY, true);
+    print_config("TTS Model", MIMI_NVS_TTS, MIMI_NVS_KEY_TTS_MODEL, MIMI_SECRET_TTS_MODEL, false);
+    print_config("TTS Voice", MIMI_NVS_TTS, MIMI_NVS_KEY_TTS_VOICE, MIMI_SECRET_TTS_VOICE, false);
     printf("=============================\n");
     return 0;
 }
@@ -657,7 +763,7 @@ static int cmd_config_show(int argc, char **argv)
 static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
-        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH, MIMI_NVS_VOICE
+        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH, MIMI_NVS_VOICE, MIMI_NVS_TTS
     };
     for (size_t i = 0; i < (sizeof(namespaces) / sizeof(namespaces[0])); i++) {
         nvs_handle_t nvs;
@@ -1076,6 +1182,59 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_set_tavily_key,
         .argtable = &tavily_key_args,
     };
+
+
+    /* set_groq_key */
+    groq_key_args.key = arg_str1(NULL, NULL, "<key>", "Groq API key");
+    groq_key_args.end = arg_end(1);
+    esp_console_cmd_t groq_key_cmd = {
+        .command = "set_groq_key",
+        .help = "Set Groq API key for TTS",
+        .func = &cmd_set_groq_key,
+        .argtable = &groq_key_args,
+    };
+    esp_console_cmd_register(&groq_key_cmd);
+
+    /* set_tts_model */
+    tts_model_args.model = arg_str1(NULL, NULL, "<model>", "Groq TTS model");
+    tts_model_args.end = arg_end(1);
+    esp_console_cmd_t tts_model_cmd = {
+        .command = "set_tts_model",
+        .help = "Set TTS model (default canopylabs/orpheus-v1-english)",
+        .func = &cmd_set_tts_model,
+        .argtable = &tts_model_args,
+    };
+    esp_console_cmd_register(&tts_model_cmd);
+
+    /* set_tts_voice */
+    tts_voice_args.voice = arg_str1(NULL, NULL, "<voice>", "Groq TTS voice");
+    tts_voice_args.end = arg_end(1);
+    esp_console_cmd_t tts_voice_cmd = {
+        .command = "set_tts_voice",
+        .help = "Set TTS voice (default austin)",
+        .func = &cmd_set_tts_voice,
+        .argtable = &tts_voice_args,
+    };
+    esp_console_cmd_register(&tts_voice_cmd);
+
+    /* tts_say */
+    tts_say_args.text = arg_str1(NULL, NULL, "<text>", "Text to synthesize and play locally");
+    tts_say_args.end = arg_end(1);
+    esp_console_cmd_t tts_say_cmd = {
+        .command = "tts_say",
+        .help = "Speak text through local MAX98357A speaker",
+        .func = &cmd_tts_say,
+        .argtable = &tts_say_args,
+    };
+    esp_console_cmd_register(&tts_say_cmd);
+
+    /* tts_diag */
+    esp_console_cmd_t tts_diag_cmd = {
+        .command = "tts_diag",
+        .help = "Show TTS worker/config/speaker status",
+        .func = &cmd_tts_diag,
+    };
+    esp_console_cmd_register(&tts_diag_cmd);
 
     /* set_voice_ws */
     voice_ws_args.url = arg_str1(NULL, NULL, "<ws_url>", "Voice WebSocket URL");

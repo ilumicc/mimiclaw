@@ -55,6 +55,15 @@
 #ifndef MIMI_SECRET_VOICE_WS_VERSION
 #define MIMI_SECRET_VOICE_WS_VERSION "v1"
 #endif
+#ifndef MIMI_SECRET_GROQ_API_KEY
+#define MIMI_SECRET_GROQ_API_KEY    ""
+#endif
+#ifndef MIMI_SECRET_TTS_MODEL
+#define MIMI_SECRET_TTS_MODEL       "canopylabs/orpheus-v1-english"
+#endif
+#ifndef MIMI_SECRET_TTS_VOICE
+#define MIMI_SECRET_TTS_VOICE       "austin"
+#endif
 
 /* WiFi */
 #define MIMI_WIFI_MAX_RETRY          10
@@ -108,6 +117,13 @@
 #define MIMI_OUTBOUND_PRIO           5
 #define MIMI_OUTBOUND_CORE           0
 
+/* TTS Service */
+#define MIMI_TTS_QUEUE_LEN           6
+#define MIMI_TTS_MAX_TEXT_LEN        360
+#define MIMI_TTS_STACK               (10 * 1024)
+#define MIMI_TTS_PRIO                5
+#define MIMI_TTS_CORE                0
+
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"
 #define MIMI_SPIFFS_CONFIG_DIR       MIMI_SPIFFS_BASE "/config"
@@ -136,6 +152,11 @@
 #define MIMI_WS_PORT                 18789
 #define MIMI_WS_MAX_CLIENTS          4
 
+/* Speaker MAX98357A (I2S TX) */
+#define MIMI_SPK_I2S_WS_GPIO         16
+#define MIMI_SPK_I2S_BCLK_GPIO       15
+#define MIMI_SPK_I2S_DOUT_GPIO       17
+
 /* Serial CLI */
 #define MIMI_CLI_STACK               (4 * 1024)
 #define MIMI_CLI_PRIO                3
@@ -149,6 +170,7 @@
 #define MIMI_NVS_PROXY               "proxy_config"
 #define MIMI_NVS_SEARCH              "search_config"
 #define MIMI_NVS_VOICE               "voice_config"
+#define MIMI_NVS_TTS                 "tts_config"
 
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID            "ssid"
@@ -166,6 +188,9 @@
 #define MIMI_NVS_KEY_VOICE_WS_URL    "voice_ws_url"
 #define MIMI_NVS_KEY_VOICE_WS_TOKEN  "voice_ws_token"
 #define MIMI_NVS_KEY_VOICE_WS_VER    "voice_ws_ver"
+#define MIMI_NVS_KEY_GROQ_API_KEY    "groq_key"
+#define MIMI_NVS_KEY_TTS_MODEL       "tts_model"
+#define MIMI_NVS_KEY_TTS_VOICE       "tts_voice"
 
 /* WiFi Onboarding (Captive Portal) */
 #define MIMI_ONBOARD_AP_PREFIX    "MimiClaw-"
