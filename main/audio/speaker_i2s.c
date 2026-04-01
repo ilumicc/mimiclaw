@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "driver/i2s_std.h"
+#include "driver/gpio.h"
 
 #include "mimi_config.h"
 
@@ -271,9 +272,8 @@ static esp_err_t write_pcm_mono_dup(const uint8_t *data, size_t len)
         const int16_t *mono = (const int16_t *)(data + offset);
         size_t samples = take / 2;
         for (size_t i = 0; i < samples; i++) {
-            int16_t s = speaker_attenuate_sample(mono[i]);
-            stereo[i * 2] = s;
-            stereo[i * 2 + 1] = s;
+            stereo[i * 2] = mono[i];
+            stereo[i * 2 + 1] = mono[i];
         }
 
         esp_err_t err = write_pcm_stereo((const uint8_t *)stereo, samples * 4);
@@ -289,26 +289,47 @@ static esp_err_t write_pcm_mono_dup(const uint8_t *data, size_t len)
     return ESP_OK;
 }
 
+static void speaker_force_gpio_idle(void)
+{
+    const gpio_num_t pins[] = {
+        (gpio_num_t)MIMI_SPK_I2S_WS_GPIO,
+        (gpio_num_t)MIMI_SPK_I2S_BCLK_GPIO,
+        (gpio_num_t)MIMI_SPK_I2S_DOUT_GPIO,
+    };
+    for (size_t i = 0; i < (sizeof(pins) / sizeof(pins[0])); i++) {
+        gpio_reset_pin(pins[i]);
+        gpio_set_direction(pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(pins[i], 0);
+    }
+}
+
 static void speaker_stop_output(void)
 {
-    if (!s_tx || !s_channel_enabled) {
-        return;
+    if (s_tx && s_channel_enabled) {
+        uint8_t silence[512] = {0};
+        size_t out = 0;
+        esp_err_t wr = i2s_channel_write(s_tx, silence, sizeof(silence), &out, pdMS_TO_TICKS(200));
+        if (wr != ESP_OK) {
+            ESP_LOGD(TAG, "Silence flush failed: %s", esp_err_to_name(wr));
+        }
+
+        esp_err_t dis = i2s_channel_disable(s_tx);
+        if (dis != ESP_OK && dis != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "i2s_channel_disable failed: %s", esp_err_to_name(dis));
+        }
+        s_channel_enabled = false;
     }
 
-    uint8_t silence[512] = {0};
-    size_t out = 0;
-    esp_err_t wr = i2s_channel_write(s_tx, silence, sizeof(silence), &out, pdMS_TO_TICKS(200));
-    if (wr != ESP_OK) {
-        ESP_LOGD(TAG, "Silence flush failed: %s", esp_err_to_name(wr));
+    if (s_tx) {
+        esp_err_t del = i2s_del_channel(s_tx);
+        if (del != ESP_OK) {
+            ESP_LOGW(TAG, "i2s_del_channel failed: %s", esp_err_to_name(del));
+        }
+        s_tx = NULL;
     }
 
-    esp_err_t dis = i2s_channel_disable(s_tx);
-    if (dis != ESP_OK && dis != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "i2s_channel_disable failed: %s", esp_err_to_name(dis));
-        return;
-    }
-
-    s_channel_enabled = false;
+    s_initialized = false;
+    speaker_force_gpio_idle();
 }
 
 esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
@@ -326,22 +347,26 @@ esp_err_t speaker_i2s_play_wav(const uint8_t *wav_data, size_t wav_len)
     err = parse_wav_header(wav_data, wav_len, &meta);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Invalid WAV: %s", esp_err_to_name(err));
+        speaker_stop_output();
         return err;
     }
 
     if (meta.audio_format != 1 || meta.bits_per_sample != 16) {
         ESP_LOGE(TAG, "Unsupported WAV format: audio_format=%u bits=%u",
                  (unsigned)meta.audio_format, (unsigned)meta.bits_per_sample);
+        speaker_stop_output();
         return ESP_ERR_NOT_SUPPORTED;
     }
 
     if (meta.data_offset + meta.data_len > wav_len) {
+        speaker_stop_output();
         return ESP_ERR_INVALID_SIZE;
     }
 
     err = speaker_reconfig_clock(meta.sample_rate);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "I2S clock reconfig failed: %s", esp_err_to_name(err));
+        speaker_stop_output();
         return err;
     }
 
