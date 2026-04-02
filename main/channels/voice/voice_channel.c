@@ -12,6 +12,8 @@
 #include "audio/audio_hal.h"
 #include "bus/message_bus.h"
 #include "channels/voice/voice_afe.h"
+#include "channels/voice/stt_client.h"
+#include "channels/voice/tts_client.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -54,9 +56,6 @@ static size_t s_recording_capacity_bytes = 0;
 static size_t s_recording_len_bytes = 0;
 static uint32_t s_silence_ms = 0;
 static uint32_t s_speech_ms = 0;
-
-static bool s_stt_ready = false;
-static bool s_tts_ready = false;
 
 static mimi_voice_state_t voice_state_get(void)
 {
@@ -111,71 +110,6 @@ static bool voice_recording_append(const int16_t *audio, size_t samples)
     memcpy(((uint8_t *)s_recording_buffer) + s_recording_len_bytes, audio, bytes);
     s_recording_len_bytes += bytes;
     return false;
-}
-
-static esp_err_t voice_stt_client_init(void)
-{
-    s_stt_ready = true;
-    return ESP_OK;
-}
-
-static esp_err_t voice_tts_client_init(void)
-{
-    s_tts_ready = true;
-    return ESP_OK;
-}
-
-static esp_err_t voice_stt_transcribe_pcm(const int16_t *audio, size_t samples,
-                                          char *out_text, size_t out_text_size)
-{
-    if (!s_stt_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!audio || samples == 0 || !out_text || out_text_size == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint32_t duration_ms = voice_samples_to_ms(samples);
-    snprintf(out_text, out_text_size, "voice captured (%u ms)", (unsigned)duration_ms);
-    return ESP_OK;
-}
-
-static esp_err_t voice_tts_synthesize_pcm(const char *text,
-                                          int16_t **out_audio,
-                                          size_t *out_samples,
-                                          uint32_t *out_sample_rate_hz)
-{
-    if (!s_tts_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!text || !out_audio || !out_samples || !out_sample_rate_hz) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    *out_audio = NULL;
-    *out_samples = 0;
-    *out_sample_rate_hz = VOICE_SAMPLE_RATE_HZ;
-
-    size_t text_len = strlen(text);
-    uint32_t tone_ms = 200 + (text_len > 100 ? 500 : (uint32_t)(text_len * 5));
-    size_t samples = ((size_t)tone_ms * VOICE_SAMPLE_RATE_HZ) / 1000;
-    if (samples == 0) {
-        samples = VOICE_SAMPLE_RATE_HZ / 10;
-    }
-
-    int16_t *buf = heap_caps_malloc(samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    const int period = VOICE_SAMPLE_RATE_HZ / 440;
-    for (size_t i = 0; i < samples; i++) {
-        buf[i] = ((int)(i % period) < (period / 2)) ? 900 : -900;
-    }
-
-    *out_audio = buf;
-    *out_samples = samples;
-    return ESP_OK;
 }
 
 static esp_err_t voice_play_wake_chime(void)
@@ -262,16 +196,16 @@ static esp_err_t voice_channel_publish_transcript(void)
         return ESP_OK;
     }
 
-    char transcript[256] = {0};
-    esp_err_t stt_err = voice_stt_transcribe_pcm(
+    char *transcript = NULL;
+    esp_err_t stt_err = stt_transcribe(
         s_recording_buffer,
         s_recording_len_bytes / sizeof(int16_t),
-        transcript,
-        sizeof(transcript));
+        &transcript);
     voice_recording_reset();
 
-    if (stt_err != ESP_OK || transcript[0] == '\0') {
+    if (stt_err != ESP_OK || !transcript || transcript[0] == '\0') {
         ESP_LOGW(TAG, "STT failed: %s", esp_err_to_name(stt_err));
+        free(transcript);
         voice_state_set(MIMI_VOICE_STATE_IDLE);
         return stt_err != ESP_OK ? stt_err : ESP_FAIL;
     }
@@ -279,15 +213,11 @@ static esp_err_t voice_channel_publish_transcript(void)
     mimi_msg_t msg = {0};
     strncpy(msg.channel, MIMI_CHAN_VOICE, sizeof(msg.channel) - 1);
     strncpy(msg.chat_id, VOICE_CHAT_ID, sizeof(msg.chat_id) - 1);
-    msg.content = strdup(transcript);
-    if (!msg.content) {
-        voice_state_set(MIMI_VOICE_STATE_IDLE);
-        return ESP_ERR_NO_MEM;
-    }
+    msg.content = transcript;
 
     esp_err_t push_err = message_bus_push_inbound(&msg);
     if (push_err != ESP_OK) {
-        free(msg.content);
+        free(transcript);
         voice_state_set(MIMI_VOICE_STATE_IDLE);
         return push_err;
     }
@@ -420,12 +350,12 @@ esp_err_t voice_channel_init(void)
         return err;
     }
 
-    err = voice_stt_client_init();
+    err = stt_client_init();
     if (err != ESP_OK) {
         return err;
     }
 
-    err = voice_tts_client_init();
+    err = tts_client_init();
     if (err != ESP_OK) {
         return err;
     }
@@ -522,37 +452,57 @@ esp_err_t voice_channel_send_message(const char *text)
         ESP_LOGW(TAG, "Disable wakenet failed: %s", esp_err_to_name(ret));
     }
 
-    int16_t *tts_audio = NULL;
-    size_t tts_samples = 0;
-    uint32_t tts_sample_rate_hz = VOICE_SAMPLE_RATE_HZ;
+    ESP_LOGI(TAG, "TTS synth start (text_len=%u)", (unsigned)strlen(text));
 
-    ret = voice_tts_synthesize_pcm(text, &tts_audio, &tts_samples, &tts_sample_rate_hz);
-    if (ret == ESP_OK && tts_audio && tts_samples > 0) {
-        audio_hal_spk_set_sample_rate(tts_sample_rate_hz);
-        audio_hal_spk_enable(true);
+    tts_result_t tts = {0};
+    ret = tts_synthesize(text, &tts);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "TTS synth failed: %s", esp_err_to_name(ret));
+    } else if (!tts.pcm_data || tts.pcm_len < sizeof(int16_t) || tts.sample_rate == 0) {
+        ret = ESP_ERR_INVALID_RESPONSE;
+        ESP_LOGE(TAG, "TTS synth invalid output (bytes=%u, sample_rate=%u)",
+                 (unsigned)tts.pcm_len, (unsigned)tts.sample_rate);
+    } else {
+        size_t tts_samples = tts.pcm_len / sizeof(int16_t);
+        uint32_t duration_ms = (uint32_t)((tts_samples * 1000U) / tts.sample_rate);
+        ESP_LOGI(TAG, "TTS synth complete (bytes=%u, sample_rate=%u, duration_ms=%u)",
+                 (unsigned)tts.pcm_len, (unsigned)tts.sample_rate, (unsigned)duration_ms);
 
-        size_t total_written = 0;
-        while (total_written < tts_samples) {
-            size_t just_written = 0;
-            esp_err_t wr = audio_hal_spk_write(
-                tts_audio + total_written,
-                tts_samples - total_written,
-                &just_written,
-                MIMI_VOICE_TTS_TIMEOUT_MS);
-            total_written += just_written;
+        esp_err_t rate_err = audio_hal_spk_set_sample_rate(tts.sample_rate);
+        if (rate_err != ESP_OK) {
+            ret = rate_err;
+            ESP_LOGE(TAG, "Speaker set sample rate failed: %s", esp_err_to_name(rate_err));
+        } else {
+            esp_err_t spk_en_err = audio_hal_spk_enable(true);
+            if (spk_en_err != ESP_OK) {
+                ret = spk_en_err;
+                ESP_LOGE(TAG, "Speaker enable failed: %s", esp_err_to_name(spk_en_err));
+            } else {
+                size_t total_written = 0;
+                const int16_t *pcm = (const int16_t *)tts.pcm_data;
 
-            if (wr != ESP_OK || just_written == 0) {
-                ret = (wr != ESP_OK) ? wr : ESP_FAIL;
-                break;
+                while (total_written < tts_samples) {
+                    size_t just_written = 0;
+                    esp_err_t wr = audio_hal_spk_write(
+                        pcm + total_written,
+                        tts_samples - total_written,
+                        &just_written,
+                        MIMI_VOICE_TTS_TIMEOUT_MS);
+                    total_written += just_written;
+
+                    if (wr != ESP_OK || just_written == 0) {
+                        ret = (wr != ESP_OK) ? wr : ESP_FAIL;
+                        ESP_LOGE(TAG, "Speaker write failed: %s", esp_err_to_name(ret));
+                        break;
+                    }
+                }
+
+                audio_hal_spk_enable(false);
             }
         }
-
-        audio_hal_spk_enable(false);
     }
 
-    if (tts_audio) {
-        free(tts_audio);
-    }
+    tts_result_free(&tts);
 
     esp_err_t wn_err = voice_afe_wakenet_enable(true);
     if (wn_err != ESP_OK) {
@@ -596,8 +546,6 @@ esp_err_t voice_channel_stop(void)
     voice_afe_deinit();
     audio_hal_deinit();
 
-    s_stt_ready = false;
-    s_tts_ready = false;
     s_initialized = false;
     voice_state_set(MIMI_VOICE_STATE_IDLE);
 

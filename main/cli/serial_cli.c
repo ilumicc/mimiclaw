@@ -449,7 +449,9 @@ static int cmd_voice_test_spk(int argc, char **argv)
 
 #define MIMI_NVS_VOICE_CFG_NS             "voice_config"
 #define MIMI_NVS_VOICE_KEY_STT_URL        "stt_url"
+#define MIMI_NVS_VOICE_KEY_STT_MODEL      "stt_model"
 #define MIMI_NVS_VOICE_KEY_TTS_URL        "tts_url"
+#define MIMI_NVS_VOICE_KEY_TTS_MODEL      "tts_model"
 #define MIMI_NVS_VOICE_KEY_WAKE_WORD      "wake_word"
 
 static struct {
@@ -458,9 +460,20 @@ static struct {
 } stt_url_args;
 
 static struct {
+    struct arg_str *model;
+    struct arg_end *end;
+} stt_model_args;
+
+
+static struct {
     struct arg_str *url;
     struct arg_end *end;
 } tts_url_args;
+
+static struct {
+    struct arg_str *model;
+    struct arg_end *end;
+} tts_model_args;
 
 static struct {
     struct arg_str *model;
@@ -505,6 +518,24 @@ static int cmd_set_stt_url(int argc, char **argv)
     return 0;
 }
 
+static int cmd_set_stt_model(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&stt_model_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, stt_model_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_cfg_set_str(MIMI_NVS_VOICE_KEY_STT_MODEL, stt_model_args.model->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save STT model: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("STT model saved.\n");
+    return 0;
+}
+
 static int cmd_set_tts_url(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&tts_url_args);
@@ -520,6 +551,24 @@ static int cmd_set_tts_url(int argc, char **argv)
     }
 
     printf("TTS URL saved.\n");
+    return 0;
+}
+
+static int cmd_set_tts_model(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&tts_model_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, tts_model_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_cfg_set_str(MIMI_NVS_VOICE_KEY_TTS_MODEL, tts_model_args.model->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save TTS model: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("TTS model saved.\n");
     return 0;
 }
 
@@ -1346,6 +1395,18 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&set_stt_url_cmd);
 
+
+    /* set_stt_model */
+    stt_model_args.model = arg_str1(NULL, NULL, "<model>", "STT model (e.g. whisper-large-v3-turbo)");
+    stt_model_args.end = arg_end(1);
+    esp_console_cmd_t set_stt_model_cmd = {
+        .command = "set_stt_model",
+        .help = "Set STT model (saved to NVS voice_config/stt_model)",
+        .func = &cmd_set_stt_model,
+        .argtable = &stt_model_args,
+    };
+    esp_console_cmd_register(&set_stt_model_cmd);
+
     /* set_tts_url */
     tts_url_args.url = arg_str1(NULL, NULL, "<url>", "TTS API endpoint URL");
     tts_url_args.end = arg_end(1);
@@ -1356,6 +1417,18 @@ esp_err_t serial_cli_init(void)
         .argtable = &tts_url_args,
     };
     esp_console_cmd_register(&set_tts_url_cmd);
+
+
+    /* set_tts_model */
+    tts_model_args.model = arg_str1(NULL, NULL, "<model>", "TTS model (e.g. canopylabs/orpheus-v1-english)");
+    tts_model_args.end = arg_end(1);
+    esp_console_cmd_t set_tts_model_cmd = {
+        .command = "set_tts_model",
+        .help = "Set TTS model (saved to NVS voice_config/tts_model)",
+        .func = &cmd_set_tts_model,
+        .argtable = &tts_model_args,
+    };
+    esp_console_cmd_register(&set_tts_model_cmd);
 
     /* set_wake_word */
     wake_word_args.model = arg_str1(NULL, NULL, "<model>", "Wake-word model name");

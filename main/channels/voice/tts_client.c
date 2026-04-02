@@ -26,6 +26,14 @@
 #define MIMI_SECRET_TTS_VOICE "alloy"
 #endif
 
+#ifndef MIMI_SECRET_TTS_MODEL
+#define MIMI_SECRET_TTS_MODEL ""
+#endif
+
+#ifndef MIMI_SECRET_TTS_RESPONSE_FORMAT
+#define MIMI_SECRET_TTS_RESPONSE_FORMAT ""
+#endif
+
 #ifndef MIMI_TTS_TIMEOUT_MS
 #ifdef MIMI_VOICE_TTS_TIMEOUT_MS
 #define MIMI_TTS_TIMEOUT_MS MIMI_VOICE_TTS_TIMEOUT_MS
@@ -37,19 +45,26 @@
 #define TTS_DEFAULT_API_URL              "https://api.openai.com/v1/audio/speech"
 #define TTS_DEFAULT_MODEL                "tts-1"
 #define TTS_DEFAULT_VOICE                "alloy"
+#define TTS_DEFAULT_RESPONSE_FORMAT      "pcm"
 #define TTS_SAMPLE_RATE_HZ               24000
 #define TTS_URL_MAX_LEN                  256
 #define TTS_KEY_MAX_LEN                  384
 #define TTS_VOICE_MAX_LEN                32
+#define TTS_MODEL_MAX_LEN                96
+#define TTS_FORMAT_MAX_LEN               16
 #define TTS_RESPONSE_INITIAL_CAP         8192
 #define TTS_MAX_RESPONSE_BYTES           (600 * 1024)
 #define TTS_PROXY_READ_CHUNK             2048
 
 #define VOICE_NVS_NAMESPACE              "voice_config"
 #define VOICE_NVS_KEY_TTS_URL            "tts_url"
+#define VOICE_NVS_KEY_TTS_MODEL          "tts_model"
+#define VOICE_NVS_KEY_TTS_FORMAT         "tts_format"
 #define TTS_NVS_KEY_API_URL              "tts_api_url"  /* legacy in llm_config */
 #define TTS_NVS_KEY_API_KEY              "tts_api_key"
 #define TTS_NVS_KEY_VOICE                "tts_voice"
+#define TTS_NVS_KEY_MODEL                "tts_model"
+#define TTS_NVS_KEY_FORMAT               "tts_format"
 
 typedef struct {
     uint8_t *data;
@@ -70,6 +85,8 @@ static bool s_initialized = false;
 static char s_api_url[TTS_URL_MAX_LEN] = TTS_DEFAULT_API_URL;
 static char s_api_key[TTS_KEY_MAX_LEN] = "";
 static char s_voice[TTS_VOICE_MAX_LEN] = TTS_DEFAULT_VOICE;
+static char s_model[TTS_MODEL_MAX_LEN] = TTS_DEFAULT_MODEL;
+static char s_response_format[TTS_FORMAT_MAX_LEN] = TTS_DEFAULT_RESPONSE_FORMAT;
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -153,6 +170,107 @@ static size_t find_bytes(const uint8_t *buf, size_t buf_len, const char *needle,
     }
     return SIZE_MAX;
 }
+
+static uint16_t read_le16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static bool str_eq_ci(const char *a, const char *b)
+{
+    if (!a || !b) {
+        return false;
+    }
+
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') {
+            ca = (char)(ca + ('a' - 'A'));
+        }
+        if (cb >= 'A' && cb <= 'Z') {
+            cb = (char)(cb + ('a' - 'A'));
+        }
+        if (ca != cb) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+
+    return *a == '\0' && *b == '\0';
+}
+
+static esp_err_t parse_wav_payload_inplace(resp_buf_t *rb, uint32_t *out_sample_rate)
+{
+    if (!rb || !rb->data || !out_sample_rate) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (rb->len < 44) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    if (memcmp(rb->data, "RIFF", 4) != 0 || memcmp(rb->data + 8, "WAVE", 4) != 0) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    bool fmt_found = false;
+    bool data_found = false;
+    uint32_t sample_rate = 0;
+    size_t data_offset = 0;
+    size_t data_size = 0;
+
+    size_t pos = 12;
+    while (pos + 8 <= rb->len) {
+        const uint8_t *chunk = rb->data + pos;
+        uint32_t chunk_size = read_le32(chunk + 4);
+        size_t payload_offset = pos + 8;
+
+        if (payload_offset + chunk_size > rb->len) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        if (memcmp(chunk, "fmt ", 4) == 0) {
+            if (chunk_size < 16) {
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+
+            uint16_t audio_format = read_le16(rb->data + payload_offset + 0);
+            uint16_t bits_per_sample = read_le16(rb->data + payload_offset + 14);
+            sample_rate = read_le32(rb->data + payload_offset + 4);
+
+            if (audio_format != 1 || bits_per_sample != 16 || sample_rate == 0) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            fmt_found = true;
+        } else if (memcmp(chunk, "data", 4) == 0) {
+            data_offset = payload_offset;
+            data_size = chunk_size;
+            data_found = true;
+        }
+
+        size_t padded = chunk_size + (chunk_size & 1U);
+        pos = payload_offset + padded;
+    }
+
+    if (!fmt_found || !data_found || data_size == 0 || data_offset + data_size > rb->len) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    memmove(rb->data, rb->data + data_offset, data_size);
+    rb->len = data_size;
+    *out_sample_rate = sample_rate;
+    return ESP_OK;
+}
+
 
 static bool parse_url(const char *url, parsed_url_t *out)
 {
@@ -495,6 +613,8 @@ esp_err_t tts_client_init(void)
 {
     safe_copy(s_api_url, sizeof(s_api_url), TTS_DEFAULT_API_URL);
     safe_copy(s_voice, sizeof(s_voice), TTS_DEFAULT_VOICE);
+    safe_copy(s_model, sizeof(s_model), TTS_DEFAULT_MODEL);
+    safe_copy(s_response_format, sizeof(s_response_format), TTS_DEFAULT_RESPONSE_FORMAT);
     s_api_key[0] = '\0';
 
     if (MIMI_SECRET_TTS_API_URL[0] != '\0') {
@@ -503,6 +623,14 @@ esp_err_t tts_client_init(void)
 
     if (MIMI_SECRET_TTS_VOICE[0] != '\0') {
         safe_copy(s_voice, sizeof(s_voice), MIMI_SECRET_TTS_VOICE);
+    }
+
+    if (MIMI_SECRET_TTS_MODEL[0] != '\0') {
+        safe_copy(s_model, sizeof(s_model), MIMI_SECRET_TTS_MODEL);
+    }
+
+    if (MIMI_SECRET_TTS_RESPONSE_FORMAT[0] != '\0') {
+        safe_copy(s_response_format, sizeof(s_response_format), MIMI_SECRET_TTS_RESPONSE_FORMAT);
     }
 
     if (MIMI_SECRET_TTS_KEY[0] != '\0') {
@@ -536,6 +664,18 @@ esp_err_t tts_client_init(void)
             safe_copy(s_voice, sizeof(s_voice), tmp_voice);
         }
 
+        char tmp_model[TTS_MODEL_MAX_LEN] = {0};
+        len = sizeof(tmp_model);
+        if (nvs_get_str(nvs, TTS_NVS_KEY_MODEL, tmp_model, &len) == ESP_OK && tmp_model[0]) {
+            safe_copy(s_model, sizeof(s_model), tmp_model);
+        }
+
+        char tmp_format[TTS_FORMAT_MAX_LEN] = {0};
+        len = sizeof(tmp_format);
+        if (nvs_get_str(nvs, TTS_NVS_KEY_FORMAT, tmp_format, &len) == ESP_OK && tmp_format[0]) {
+            safe_copy(s_response_format, sizeof(s_response_format), tmp_format);
+        }
+
         nvs_close(nvs);
     }
 
@@ -545,6 +685,19 @@ esp_err_t tts_client_init(void)
         if (nvs_get_str(nvs, VOICE_NVS_KEY_TTS_URL, tmp_url, &len) == ESP_OK && tmp_url[0]) {
             safe_copy(s_api_url, sizeof(s_api_url), tmp_url);
         }
+
+        char tmp_model[TTS_MODEL_MAX_LEN] = {0};
+        len = sizeof(tmp_model);
+        if (nvs_get_str(nvs, VOICE_NVS_KEY_TTS_MODEL, tmp_model, &len) == ESP_OK && tmp_model[0]) {
+            safe_copy(s_model, sizeof(s_model), tmp_model);
+        }
+
+        char tmp_format[TTS_FORMAT_MAX_LEN] = {0};
+        len = sizeof(tmp_format);
+        if (nvs_get_str(nvs, VOICE_NVS_KEY_TTS_FORMAT, tmp_format, &len) == ESP_OK && tmp_format[0]) {
+            safe_copy(s_response_format, sizeof(s_response_format), tmp_format);
+        }
+
         nvs_close(nvs);
     }
 
@@ -553,7 +706,11 @@ esp_err_t tts_client_init(void)
     }
 
     s_initialized = true;
-    ESP_LOGI(TAG, "TTS client initialized (url=%s, voice=%s)", s_api_url, s_voice);
+    ESP_LOGI(TAG, "TTS client initialized (url=%s, model=%s, voice=%s, format=%s)",
+             s_api_url,
+             s_model,
+             s_voice,
+             s_response_format);
     return ESP_OK;
 }
 
@@ -587,10 +744,10 @@ esp_err_t tts_synthesize(const char *text, tts_result_t *out_result)
         return ESP_ERR_NO_MEM;
     }
 
-    cJSON_AddStringToObject(root, "model", TTS_DEFAULT_MODEL);
+    cJSON_AddStringToObject(root, "model", s_model);
     cJSON_AddStringToObject(root, "input", text);
     cJSON_AddStringToObject(root, "voice", s_voice);
-    cJSON_AddStringToObject(root, "response_format", "pcm");
+    cJSON_AddStringToObject(root, "response_format", s_response_format);
 
     char *json_body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -626,9 +783,23 @@ esp_err_t tts_synthesize(const char *text, tts_result_t *out_result)
         return ESP_ERR_NOT_FOUND;
     }
 
+    uint32_t sample_rate = TTS_SAMPLE_RATE_HZ;
+    if (rb.len >= 12 && memcmp(rb.data, "RIFF", 4) == 0 && memcmp(rb.data + 8, "WAVE", 4) == 0) {
+        err = parse_wav_payload_inplace(&rb, &sample_rate);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "WAV parse failed: %s", esp_err_to_name(err));
+            resp_buf_free(&rb);
+            return err;
+        }
+    } else if (str_eq_ci(s_response_format, "wav")) {
+        ESP_LOGE(TAG, "Expected WAV response but header not detected");
+        resp_buf_free(&rb);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
     out_result->pcm_data = rb.data;
     out_result->pcm_len = rb.len;
-    out_result->sample_rate = TTS_SAMPLE_RATE_HZ;
+    out_result->sample_rate = sample_rate;
     return ESP_OK;
 }
 

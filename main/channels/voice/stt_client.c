@@ -23,6 +23,14 @@
 #define MIMI_SECRET_STT_KEY ""
 #endif
 
+#ifndef MIMI_SECRET_STT_MODEL
+#define MIMI_SECRET_STT_MODEL ""
+#endif
+
+#ifndef MIMI_SECRET_STT_LANGUAGE
+#define MIMI_SECRET_STT_LANGUAGE ""
+#endif
+
 #ifndef MIMI_STT_TIMEOUT_MS
 #ifdef MIMI_VOICE_STT_TIMEOUT_MS
 #define MIMI_STT_TIMEOUT_MS MIMI_VOICE_STT_TIMEOUT_MS
@@ -36,13 +44,17 @@
 #define STT_FORM_BOUNDARY                   "----mimiclawstt8f8cd57e"
 #define STT_URL_MAX_LEN                     256
 #define STT_KEY_MAX_LEN                     384
+#define STT_MODEL_MAX_LEN                   64
+#define STT_LANG_MAX_LEN                    16
 #define STT_RESPONSE_INITIAL_CAP            2048
 #define STT_PROXY_READ_CHUNK                2048
 
 #define VOICE_NVS_NAMESPACE                 "voice_config"
 #define VOICE_NVS_KEY_STT_URL               "stt_url"
+#define VOICE_NVS_KEY_STT_MODEL             "stt_model"
 #define STT_NVS_KEY_API_URL                 "stt_api_url"  /* legacy in llm_config */
 #define STT_NVS_KEY_API_KEY                 "stt_api_key"
+#define STT_NVS_KEY_MODEL                   "stt_model"
 
 typedef struct {
     char *data;
@@ -62,6 +74,8 @@ static const char *TAG = "stt_client";
 static bool s_initialized = false;
 static char s_api_url[STT_URL_MAX_LEN] = STT_DEFAULT_API_URL;
 static char s_api_key[STT_KEY_MAX_LEN] = "";
+static char s_model[STT_MODEL_MAX_LEN] = STT_DEFAULT_MODEL;
+static char s_language[STT_LANG_MAX_LEN] = "";
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -279,16 +293,36 @@ static char *build_multipart_body(const int16_t *pcm, size_t sample_count, size_
         return NULL;
     }
 
-    char prefix[512];
+    char language_block[128] = {0};
+    if (s_language[0] != '\0') {
+        int language_len = snprintf(language_block, sizeof(language_block),
+                                    "--%s\r\n"
+                                    "Content-Disposition: form-data; name=\"language\"\r\n\r\n"
+                                    "%s\r\n",
+                                    STT_FORM_BOUNDARY,
+                                    s_language);
+        if (language_len <= 0 || language_len >= (int)sizeof(language_block)) {
+            free(wav);
+            return NULL;
+        }
+    }
+
+    char prefix[1024];
     int prefix_len = snprintf(prefix, sizeof(prefix),
                               "--%s\r\n"
                               "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
                               "%s\r\n"
                               "--%s\r\n"
+                              "Content-Disposition: form-data; name=\"response_format\"\r\n\r\n"
+                              "json\r\n"
+                              "%s"
+                              "--%s\r\n"
                               "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
                               "Content-Type: audio/wav\r\n\r\n",
                               STT_FORM_BOUNDARY,
-                              STT_DEFAULT_MODEL,
+                              s_model,
+                              STT_FORM_BOUNDARY,
+                              language_block,
                               STT_FORM_BOUNDARY);
     if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) {
         free(wav);
@@ -441,10 +475,20 @@ static esp_err_t stt_http_call(const char *body, size_t body_len, resp_buf_t *rb
 esp_err_t stt_client_init(void)
 {
     safe_copy(s_api_url, sizeof(s_api_url), STT_DEFAULT_API_URL);
+    safe_copy(s_model, sizeof(s_model), STT_DEFAULT_MODEL);
     s_api_key[0] = '\0';
+    s_language[0] = '\0';
 
     if (MIMI_SECRET_STT_API_URL[0] != '\0') {
         safe_copy(s_api_url, sizeof(s_api_url), MIMI_SECRET_STT_API_URL);
+    }
+
+    if (MIMI_SECRET_STT_MODEL[0] != '\0') {
+        safe_copy(s_model, sizeof(s_model), MIMI_SECRET_STT_MODEL);
+    }
+
+    if (MIMI_SECRET_STT_LANGUAGE[0] != '\0') {
+        safe_copy(s_language, sizeof(s_language), MIMI_SECRET_STT_LANGUAGE);
     }
 
     if (MIMI_SECRET_STT_KEY[0] != '\0') {
@@ -472,6 +516,12 @@ esp_err_t stt_client_init(void)
             }
         }
 
+        char tmp_model[STT_MODEL_MAX_LEN] = {0};
+        len = sizeof(tmp_model);
+        if (nvs_get_str(nvs, STT_NVS_KEY_MODEL, tmp_model, &len) == ESP_OK && tmp_model[0]) {
+            safe_copy(s_model, sizeof(s_model), tmp_model);
+        }
+
         nvs_close(nvs);
     }
 
@@ -481,6 +531,13 @@ esp_err_t stt_client_init(void)
         if (nvs_get_str(nvs, VOICE_NVS_KEY_STT_URL, tmp_url, &len) == ESP_OK && tmp_url[0]) {
             safe_copy(s_api_url, sizeof(s_api_url), tmp_url);
         }
+
+        char tmp_model[STT_MODEL_MAX_LEN] = {0};
+        len = sizeof(tmp_model);
+        if (nvs_get_str(nvs, VOICE_NVS_KEY_STT_MODEL, tmp_model, &len) == ESP_OK && tmp_model[0]) {
+            safe_copy(s_model, sizeof(s_model), tmp_model);
+        }
+
         nvs_close(nvs);
     }
 
@@ -489,7 +546,10 @@ esp_err_t stt_client_init(void)
     }
 
     s_initialized = true;
-    ESP_LOGI(TAG, "STT client initialized (url=%s)", s_api_url);
+    ESP_LOGI(TAG, "STT client initialized (url=%s, model=%s, language=%s)",
+             s_api_url,
+             s_model,
+             s_language[0] ? s_language : "auto");
     return ESP_OK;
 }
 
