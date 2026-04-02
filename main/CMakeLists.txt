@@ -5,6 +5,8 @@ idf_component_register(
         "wifi/wifi_manager.c"
         "channels/telegram/telegram_bot.c"
         "channels/feishu/feishu_bot.c"
+        "channels/voice/voice_afe.c"
+        "channels/voice/voice_channel.c"
         "llm/llm_proxy.c"
         "agent/agent_loop.c"
         "agent/context_builder.c"
