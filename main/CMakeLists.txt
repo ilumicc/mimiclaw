@@ -7,6 +7,8 @@ idf_component_register(
         "channels/feishu/feishu_bot.c"
         "channels/voice/voice_afe.c"
         "channels/voice/voice_channel.c"
+        "channels/voice/stt_client.c"
+        "channels/voice/tts_client.c"
         "llm/llm_proxy.c"
         "agent/agent_loop.c"
         "agent/context_builder.c"
