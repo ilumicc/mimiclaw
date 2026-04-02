@@ -45,7 +45,9 @@
 #define TTS_MAX_RESPONSE_BYTES           (600 * 1024)
 #define TTS_PROXY_READ_CHUNK             2048
 
-#define TTS_NVS_KEY_API_URL              "tts_api_url"
+#define VOICE_NVS_NAMESPACE              "voice_config"
+#define VOICE_NVS_KEY_TTS_URL            "tts_url"
+#define TTS_NVS_KEY_API_URL              "tts_api_url"  /* legacy in llm_config */
 #define TTS_NVS_KEY_API_KEY              "tts_api_key"
 #define TTS_NVS_KEY_VOICE                "tts_voice"
 
@@ -534,6 +536,15 @@ esp_err_t tts_client_init(void)
             safe_copy(s_voice, sizeof(s_voice), tmp_voice);
         }
 
+        nvs_close(nvs);
+    }
+
+    if (nvs_open(VOICE_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        char tmp_url[TTS_URL_MAX_LEN] = {0};
+        size_t len = sizeof(tmp_url);
+        if (nvs_get_str(nvs, VOICE_NVS_KEY_TTS_URL, tmp_url, &len) == ESP_OK && tmp_url[0]) {
+            safe_copy(s_api_url, sizeof(s_api_url), tmp_url);
+        }
         nvs_close(nvs);
     }
 

@@ -2,6 +2,7 @@
 
 #if MIMI_VOICE_ENABLED
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,12 +20,21 @@
 #define VOICE_SAMPLE_RATE_HZ            16000
 #define VOICE_CHAT_ID                   "voice_default"
 
-typedef enum {
-    VOICE_STATE_IDLE = 0,
-    VOICE_STATE_RECORDING,
-    VOICE_STATE_PROCESSING,
-    VOICE_STATE_PLAYING,
-} voice_state_t;
+#ifndef MIMI_VOICE_WAKE_CHIME_ENABLED
+#define MIMI_VOICE_WAKE_CHIME_ENABLED   1
+#endif
+
+#ifndef MIMI_VOICE_WAKE_CHIME_FREQ_HZ
+#define MIMI_VOICE_WAKE_CHIME_FREQ_HZ   880
+#endif
+
+#ifndef MIMI_VOICE_WAKE_CHIME_MS
+#define MIMI_VOICE_WAKE_CHIME_MS        200
+#endif
+
+#ifndef MIMI_VOICE_WAKE_CHIME_AMPLITUDE
+#define MIMI_VOICE_WAKE_CHIME_AMPLITUDE 2600
+#endif
 
 static const char *TAG = "voice_channel";
 
@@ -33,7 +43,7 @@ static TaskHandle_t s_detect_task = NULL;
 static bool s_initialized = false;
 static bool s_running = false;
 
-static voice_state_t s_state = VOICE_STATE_IDLE;
+static mimi_voice_state_t s_state = MIMI_VOICE_STATE_IDLE;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static int16_t *s_feed_buffer = NULL;
@@ -48,16 +58,16 @@ static uint32_t s_speech_ms = 0;
 static bool s_stt_ready = false;
 static bool s_tts_ready = false;
 
-static voice_state_t voice_state_get(void)
+static mimi_voice_state_t voice_state_get(void)
 {
-    voice_state_t state;
+    mimi_voice_state_t state;
     portENTER_CRITICAL(&s_state_lock);
     state = s_state;
     portEXIT_CRITICAL(&s_state_lock);
     return state;
 }
 
-static void voice_state_set(voice_state_t state)
+static void voice_state_set(mimi_voice_state_t state)
 {
     portENTER_CRITICAL(&s_state_lock);
     s_state = state;
@@ -168,10 +178,79 @@ static esp_err_t voice_tts_synthesize_pcm(const char *text,
     return ESP_OK;
 }
 
+static esp_err_t voice_play_wake_chime(void)
+{
+#if !MIMI_VOICE_WAKE_CHIME_ENABLED
+    return ESP_OK;
+#else
+    const uint32_t sample_rate_hz = VOICE_SAMPLE_RATE_HZ;
+    const size_t total_samples = ((size_t)MIMI_VOICE_WAKE_CHIME_MS * sample_rate_hz) / 1000;
+    if (total_samples == 0) {
+        return ESP_OK;
+    }
+
+    int16_t *tone = heap_caps_malloc(total_samples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!tone) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    const float omega = (2.0f * 3.14159265358979323846f * (float)MIMI_VOICE_WAKE_CHIME_FREQ_HZ) /
+                        (float)sample_rate_hz;
+    const size_t ramp_samples = (sample_rate_hz / 100);  /* 10ms attack/release */
+
+    for (size_t i = 0; i < total_samples; i++) {
+        float env = 1.0f;
+        if (ramp_samples > 0 && i < ramp_samples) {
+            env = (float)i / (float)ramp_samples;
+        }
+        if (ramp_samples > 0 && i + ramp_samples >= total_samples) {
+            size_t remain = total_samples - i;
+            float tail = (float)remain / (float)ramp_samples;
+            if (tail < env) {
+                env = tail;
+            }
+        }
+
+        float sample = sinf(omega * (float)i) * (float)MIMI_VOICE_WAKE_CHIME_AMPLITUDE * env;
+        tone[i] = (int16_t)sample;
+    }
+
+    esp_err_t err = audio_hal_spk_set_sample_rate(sample_rate_hz);
+    if (err != ESP_OK) {
+        free(tone);
+        return err;
+    }
+
+    err = audio_hal_spk_enable(true);
+    if (err != ESP_OK) {
+        free(tone);
+        return err;
+    }
+
+    size_t written = 0;
+    while (written < total_samples) {
+        size_t just_written = 0;
+        esp_err_t wr = audio_hal_spk_write(tone + written,
+                                           total_samples - written,
+                                           &just_written,
+                                           500);
+        written += just_written;
+        if (wr != ESP_OK || just_written == 0) {
+            err = (wr != ESP_OK) ? wr : ESP_FAIL;
+            break;
+        }
+    }
+
+    audio_hal_spk_enable(false);
+    free(tone);
+    return err;
+#endif
+}
+
 static esp_err_t voice_channel_publish_transcript(void)
 {
     if (!s_recording_buffer || s_recording_len_bytes == 0) {
-        voice_state_set(VOICE_STATE_IDLE);
+        voice_state_set(MIMI_VOICE_STATE_IDLE);
         return ESP_OK;
     }
 
@@ -179,7 +258,7 @@ static esp_err_t voice_channel_publish_transcript(void)
         ESP_LOGI(TAG, "Discard short speech: %u ms < %u ms",
                  (unsigned)s_speech_ms, (unsigned)MIMI_VOICE_MIN_SPEECH_MS);
         voice_recording_reset();
-        voice_state_set(VOICE_STATE_IDLE);
+        voice_state_set(MIMI_VOICE_STATE_IDLE);
         return ESP_OK;
     }
 
@@ -193,7 +272,7 @@ static esp_err_t voice_channel_publish_transcript(void)
 
     if (stt_err != ESP_OK || transcript[0] == '\0') {
         ESP_LOGW(TAG, "STT failed: %s", esp_err_to_name(stt_err));
-        voice_state_set(VOICE_STATE_IDLE);
+        voice_state_set(MIMI_VOICE_STATE_IDLE);
         return stt_err != ESP_OK ? stt_err : ESP_FAIL;
     }
 
@@ -202,14 +281,14 @@ static esp_err_t voice_channel_publish_transcript(void)
     strncpy(msg.chat_id, VOICE_CHAT_ID, sizeof(msg.chat_id) - 1);
     msg.content = strdup(transcript);
     if (!msg.content) {
-        voice_state_set(VOICE_STATE_IDLE);
+        voice_state_set(MIMI_VOICE_STATE_IDLE);
         return ESP_ERR_NO_MEM;
     }
 
     esp_err_t push_err = message_bus_push_inbound(&msg);
     if (push_err != ESP_OK) {
         free(msg.content);
-        voice_state_set(VOICE_STATE_IDLE);
+        voice_state_set(MIMI_VOICE_STATE_IDLE);
         return push_err;
     }
 
@@ -254,23 +333,41 @@ static void voice_detect_task(void *arg)
             continue;
         }
 
-        voice_state_t state = voice_state_get();
-        if (state == VOICE_STATE_PLAYING || state == VOICE_STATE_PROCESSING) {
+        mimi_voice_state_t state = voice_state_get();
+        if (state == MIMI_VOICE_STATE_PLAYING || state == MIMI_VOICE_STATE_PROCESSING) {
             continue;
         }
 
-        if (state == VOICE_STATE_IDLE) {
+        if (state == MIMI_VOICE_STATE_IDLE) {
             if (!result.wake_word_detected) {
                 continue;
             }
 
-            ESP_LOGI(TAG, "Wake word detected, transition IDLE -> RECORDING");
+            ESP_LOGI(TAG, "Wake word detected");
+            voice_state_set(MIMI_VOICE_STATE_PLAYING);
+
+            esp_err_t wn_off_err = voice_afe_wakenet_enable(false);
+            if (wn_off_err != ESP_OK) {
+                ESP_LOGW(TAG, "Disable wakenet for chime failed: %s", esp_err_to_name(wn_off_err));
+            }
+
+            esp_err_t chime_err = voice_play_wake_chime();
+            if (chime_err != ESP_OK) {
+                ESP_LOGW(TAG, "Wake chime playback failed: %s", esp_err_to_name(chime_err));
+            }
+
+            esp_err_t wn_on_err = voice_afe_wakenet_enable(true);
+            if (wn_on_err != ESP_OK) {
+                ESP_LOGW(TAG, "Re-enable wakenet after chime failed: %s", esp_err_to_name(wn_on_err));
+            }
+
+            ESP_LOGI(TAG, "Transition IDLE -> RECORDING");
             voice_recording_reset();
-            voice_state_set(VOICE_STATE_RECORDING);
-            state = VOICE_STATE_RECORDING;
+            voice_state_set(MIMI_VOICE_STATE_RECORDING);
+            state = MIMI_VOICE_STATE_RECORDING;
         }
 
-        if (state != VOICE_STATE_RECORDING) {
+        if (state != MIMI_VOICE_STATE_RECORDING) {
             continue;
         }
 
@@ -297,9 +394,9 @@ static void voice_detect_task(void *arg)
                      (unsigned)s_silence_ms);
         }
 
-        voice_state_set(VOICE_STATE_PROCESSING);
-        if (voice_channel_publish_transcript() != ESP_OK && voice_state_get() == VOICE_STATE_PROCESSING) {
-            voice_state_set(VOICE_STATE_IDLE);
+        voice_state_set(MIMI_VOICE_STATE_PROCESSING);
+        if (voice_channel_publish_transcript() != ESP_OK && voice_state_get() == MIMI_VOICE_STATE_PROCESSING) {
+            voice_state_set(MIMI_VOICE_STATE_IDLE);
         }
     }
 
@@ -357,7 +454,7 @@ esp_err_t voice_channel_init(void)
     }
 
     voice_recording_reset();
-    voice_state_set(VOICE_STATE_IDLE);
+    voice_state_set(MIMI_VOICE_STATE_IDLE);
     audio_hal_spk_enable(false);
 
     s_initialized = true;
@@ -418,7 +515,7 @@ esp_err_t voice_channel_send_message(const char *text)
         return ESP_ERR_INVALID_ARG;
     }
 
-    voice_state_set(VOICE_STATE_PLAYING);
+    voice_state_set(MIMI_VOICE_STATE_PLAYING);
 
     esp_err_t ret = voice_afe_wakenet_enable(false);
     if (ret != ESP_OK) {
@@ -465,7 +562,7 @@ esp_err_t voice_channel_send_message(const char *text)
         }
     }
 
-    voice_state_set(VOICE_STATE_IDLE);
+    voice_state_set(MIMI_VOICE_STATE_IDLE);
     return ret;
 }
 
@@ -502,9 +599,25 @@ esp_err_t voice_channel_stop(void)
     s_stt_ready = false;
     s_tts_ready = false;
     s_initialized = false;
-    voice_state_set(VOICE_STATE_IDLE);
+    voice_state_set(MIMI_VOICE_STATE_IDLE);
 
     return ESP_OK;
 }
+
+esp_err_t voice_channel_get_state(mimi_voice_state_t *out_state)
+{
+    if (!out_state) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *out_state = voice_state_get();
+    return ESP_OK;
+}
+
+bool voice_channel_is_initialized(void)
+{
+    return s_initialized;
+}
+
 
 #endif

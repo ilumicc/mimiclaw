@@ -4,11 +4,14 @@ on:
   push:
     branches:
       - '**'
+    tags:
+      - 'v*'
   pull_request:
 
 jobs:
   idf-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container:
       image: espressif/idf:v5.5.2
 
@@ -16,10 +19,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build firmware (ESP32-S3)
+      - name: Cache ESP-IDF component downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            /github/home/.espressif
+            managed_components
+          key: ${{ runner.os }}-idf55-${{ hashFiles('main/idf_component.yml', 'dependencies.lock', 'partitions.csv', 'sdkconfig.defaults', 'sdkconfig.defaults.esp32s3') }}
+          restore-keys: |
+            ${{ runner.os }}-idf55-
+
+      - name: Build firmware + model partition (ESP32-S3)
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
           idf.py set-target esp32s3
           idf.py fullclean
           idf.py build
+
+          test -f build/srmodels/srmodels.bin
+          cp build/srmodels/srmodels.bin build/model.bin
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          retention-days: 14
+          path: |
+            build/mimiclaw.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/ota_data_initial.bin
+            build/spiffs.bin
+            build/srmodels/srmodels.bin
+            build/model.bin
+
+      - name: Upload release bundle (tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          retention-days: 30
+          path: |
+            build/mimiclaw.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/ota_data_initial.bin
+            build/spiffs.bin
+            build/model.bin

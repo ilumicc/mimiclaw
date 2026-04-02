@@ -14,8 +14,9 @@
 #include "wifi/wifi_manager.h"
 #include "channels/telegram/telegram_bot.h"
 #include "channels/feishu/feishu_bot.h"
-#include "channels/voice/voice_afe.h"
+#if MIMI_VOICE_ENABLED
 #include "channels/voice/voice_channel.h"
+#endif
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
 #include "memory/memory_store.h"
@@ -94,11 +95,13 @@ static void outbound_dispatch_task(void *arg)
             if (ws_err != ESP_OK) {
                 ESP_LOGW(TAG, "WS send failed for %s: %s", msg.chat_id, esp_err_to_name(ws_err));
             }
+#if MIMI_VOICE_ENABLED
         } else if (strcmp(msg.channel, MIMI_CHAN_VOICE) == 0) {
             esp_err_t voice_err = voice_channel_send_message(msg.content);
             if (voice_err != ESP_OK) {
                 ESP_LOGW(TAG, "Voice playback failed: %s", esp_err_to_name(voice_err));
             }
+#endif
         } else if (strcmp(msg.channel, MIMI_CHAN_SYSTEM) == 0) {
             ESP_LOGI(TAG, "System message [%s]: %.128s", msg.chat_id, msg.content);
         } else {
@@ -130,8 +133,8 @@ void app_main(void)
     ESP_ERROR_CHECK(init_spiffs());
 
 #if MIMI_VOICE_ENABLED
-    /* Initialize ESP-SR early to get contiguous PSRAM blocks */
-    ESP_ERROR_CHECK(voice_afe_init());
+    /* Voice hardware init does not require network */
+    ESP_ERROR_CHECK(voice_channel_init());
 #endif
 
     /* Initialize subsystems */
@@ -188,7 +191,6 @@ void app_main(void)
             ? ESP_OK : ESP_FAIL);
 
 #if MIMI_VOICE_ENABLED
-        ESP_ERROR_CHECK(voice_channel_init());
         ESP_ERROR_CHECK(voice_channel_start());
 #endif
 

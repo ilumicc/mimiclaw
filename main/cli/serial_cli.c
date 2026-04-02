@@ -13,10 +13,17 @@
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
 
+#if MIMI_VOICE_ENABLED
+#include "audio/audio_hal.h"
+#include "channels/voice/voice_afe.h"
+#include "channels/voice/voice_channel.h"
+#endif
+
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_system.h"
@@ -238,6 +245,9 @@ static int cmd_session_clear(int argc, char **argv)
 /* --- heap_info command --- */
 static int cmd_heap_info(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
+
     printf("Internal free: %d bytes\n",
            (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     printf("PSRAM free:    %d bytes\n",
@@ -246,6 +256,293 @@ static int cmd_heap_info(int argc, char **argv)
            (int)esp_get_free_heap_size());
     return 0;
 }
+
+#if MIMI_VOICE_ENABLED
+
+#define VOICE_TEST_MIC_SAMPLE_RATE_HZ     16000
+#define VOICE_TEST_MIC_DURATION_S          3
+#define VOICE_TEST_MIC_READ_CHUNK          512
+#define VOICE_TEST_SPK_SAMPLE_RATE_HZ      24000
+#define VOICE_TEST_SPK_DURATION_S          2
+#define VOICE_TEST_SPK_FREQ_HZ             440.0f
+#define VOICE_TEST_SPK_AMPLITUDE           5000.0f
+#define VOICE_TEST_SPK_RESTORE_RATE_HZ     16000
+
+static const char *voice_state_to_string(mimi_voice_state_t state)
+{
+    switch (state) {
+        case MIMI_VOICE_STATE_IDLE:
+            return "IDLE";
+        case MIMI_VOICE_STATE_RECORDING:
+            return "RECORDING";
+        case MIMI_VOICE_STATE_PROCESSING:
+            return "PROCESSING";
+        case MIMI_VOICE_STATE_PLAYING:
+            return "PLAYING";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static int cmd_voice_status(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    mimi_voice_state_t state = MIMI_VOICE_STATE_IDLE;
+    if (voice_channel_get_state(&state) != ESP_OK) {
+        state = MIMI_VOICE_STATE_IDLE;
+    }
+
+    bool afe_initialized = (voice_afe_get_feed_chunksize() > 0) && (voice_afe_get_feed_channels() > 0);
+
+    printf("Voice state:     %s\n", voice_state_to_string(state));
+    printf("Voice init:      %s\n", voice_channel_is_initialized() ? "yes" : "no");
+    printf("AFE initialized: %s\n", afe_initialized ? "yes" : "no");
+    printf("Internal free:   %d bytes\n", (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    printf("PSRAM free:      %d bytes\n", (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    return 0;
+}
+
+static int cmd_voice_test_mic(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = audio_hal_init();
+    if (err != ESP_OK) {
+        printf("audio_hal_init failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    const size_t target_samples = VOICE_TEST_MIC_DURATION_S * VOICE_TEST_MIC_SAMPLE_RATE_HZ;
+    int16_t *buf = heap_caps_malloc(VOICE_TEST_MIC_READ_CHUNK * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf) {
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    int64_t sum_sq = 0;
+    int32_t peak = 0;
+    size_t captured = 0;
+
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS((VOICE_TEST_MIC_DURATION_S + 2) * 1000);
+    printf("Recording mic for %d seconds...\n", VOICE_TEST_MIC_DURATION_S);
+
+    while (captured < target_samples && xTaskGetTickCount() < deadline) {
+        size_t need = target_samples - captured;
+        if (need > VOICE_TEST_MIC_READ_CHUNK) {
+            need = VOICE_TEST_MIC_READ_CHUNK;
+        }
+
+        size_t got = audio_hal_mic_read(buf, need, 200);
+        if (got == 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        for (size_t i = 0; i < got; i++) {
+            int32_t s = buf[i];
+            int32_t abs_s = s < 0 ? -s : s;
+            if (abs_s > peak) {
+                peak = abs_s;
+            }
+            sum_sq += (int64_t)s * (int64_t)s;
+        }
+        captured += got;
+    }
+
+    free(buf);
+
+    if (captured == 0) {
+        printf("Mic read failed: no samples captured.\n");
+        return 1;
+    }
+
+    double rms = sqrt((double)sum_sq / (double)captured);
+    double rms_db = (rms > 0.0) ? (20.0 * log10(rms / 32768.0)) : -120.0;
+    double peak_db = (peak > 0) ? (20.0 * log10((double)peak / 32768.0)) : -120.0;
+
+    printf("Captured: %u samples (~%u ms)\n", (unsigned)captured,
+           (unsigned)((captured * 1000U) / VOICE_TEST_MIC_SAMPLE_RATE_HZ));
+    printf("RMS: %.2f dBFS\n", rms_db);
+    printf("Peak: %.2f dBFS (%d)\n", peak_db, (int)peak);
+
+    if (captured < target_samples) {
+        printf("Mic test incomplete (timeout before 3 seconds).\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int cmd_voice_test_spk(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = audio_hal_init();
+    if (err != ESP_OK) {
+        printf("audio_hal_init failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    err = audio_hal_spk_set_sample_rate(VOICE_TEST_SPK_SAMPLE_RATE_HZ);
+    if (err != ESP_OK) {
+        printf("audio_hal_spk_set_sample_rate failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    err = audio_hal_spk_enable(true);
+    if (err != ESP_OK) {
+        printf("audio_hal_spk_enable(true) failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    const size_t total_samples = VOICE_TEST_SPK_SAMPLE_RATE_HZ * VOICE_TEST_SPK_DURATION_S;
+    const size_t chunk_samples = 512;
+    int16_t *tone = heap_caps_malloc(chunk_samples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!tone) {
+        audio_hal_spk_enable(false);
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    const float omega = (2.0f * 3.14159265358979323846f * VOICE_TEST_SPK_FREQ_HZ) / (float)VOICE_TEST_SPK_SAMPLE_RATE_HZ;
+    size_t generated = 0;
+
+    while (generated < total_samples) {
+        size_t n = total_samples - generated;
+        if (n > chunk_samples) {
+            n = chunk_samples;
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            float sample = sinf(omega * (float)(generated + i));
+            tone[i] = (int16_t)(sample * VOICE_TEST_SPK_AMPLITUDE);
+        }
+
+        size_t written_total = 0;
+        while (written_total < n) {
+            size_t just_written = 0;
+            err = audio_hal_spk_write(tone + written_total, n - written_total, &just_written, 500);
+            if (err != ESP_OK || just_written == 0) {
+                free(tone);
+                audio_hal_spk_enable(false);
+                audio_hal_spk_set_sample_rate(VOICE_TEST_SPK_RESTORE_RATE_HZ);
+                printf("Speaker write failed: %s\n", esp_err_to_name(err != ESP_OK ? err : ESP_FAIL));
+                return 1;
+            }
+            written_total += just_written;
+        }
+
+        generated += n;
+    }
+
+    free(tone);
+    audio_hal_spk_enable(false);
+    audio_hal_spk_set_sample_rate(VOICE_TEST_SPK_RESTORE_RATE_HZ);
+
+    printf("Played %.1f Hz sine tone for %d seconds.\n", VOICE_TEST_SPK_FREQ_HZ, VOICE_TEST_SPK_DURATION_S);
+    return 0;
+}
+
+#define MIMI_NVS_VOICE_CFG_NS             "voice_config"
+#define MIMI_NVS_VOICE_KEY_STT_URL        "stt_url"
+#define MIMI_NVS_VOICE_KEY_TTS_URL        "tts_url"
+#define MIMI_NVS_VOICE_KEY_WAKE_WORD      "wake_word"
+
+static struct {
+    struct arg_str *url;
+    struct arg_end *end;
+} stt_url_args;
+
+static struct {
+    struct arg_str *url;
+    struct arg_end *end;
+} tts_url_args;
+
+static struct {
+    struct arg_str *model;
+    struct arg_end *end;
+} wake_word_args;
+
+static esp_err_t voice_cfg_set_str(const char *key, const char *value)
+{
+    if (!key || !value || value[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MIMI_NVS_VOICE_CFG_NS, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(nvs, key, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return err;
+}
+
+static int cmd_set_stt_url(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&stt_url_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, stt_url_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_cfg_set_str(MIMI_NVS_VOICE_KEY_STT_URL, stt_url_args.url->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save STT URL: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("STT URL saved.\n");
+    return 0;
+}
+
+static int cmd_set_tts_url(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&tts_url_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, tts_url_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_cfg_set_str(MIMI_NVS_VOICE_KEY_TTS_URL, tts_url_args.url->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save TTS URL: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("TTS URL saved.\n");
+    return 0;
+}
+
+static int cmd_set_wake_word(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&wake_word_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, wake_word_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = voice_cfg_set_str(MIMI_NVS_VOICE_KEY_WAKE_WORD, wake_word_args.model->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save wake word model: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Wake word model saved; restart required.\n");
+    return 0;
+}
+
+
+#endif
 
 /* --- set_proxy command --- */
 static struct {
@@ -771,6 +1068,8 @@ static int cmd_web_search(int argc, char **argv)
 /* --- restart command --- */
 static int cmd_restart(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     printf("Restarting...\n");
     esp_restart();
     return 0;  /* unreachable */
@@ -973,6 +1272,33 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&heap_cmd);
 
+#if MIMI_VOICE_ENABLED
+    /* voice_status */
+    esp_console_cmd_t voice_status_cmd = {
+        .command = "voice_status",
+        .help = "Show voice state, heap usage, and AFE status",
+        .func = &cmd_voice_status,
+    };
+    esp_console_cmd_register(&voice_status_cmd);
+
+    /* voice_test_mic */
+    esp_console_cmd_t voice_test_mic_cmd = {
+        .command = "voice_test_mic",
+        .help = "Record mic for 3s and print RMS/peak volume",
+        .func = &cmd_voice_test_mic,
+    };
+    esp_console_cmd_register(&voice_test_mic_cmd);
+
+    /* voice_test_spk */
+    esp_console_cmd_t voice_test_spk_cmd = {
+        .command = "voice_test_spk",
+        .help = "Play 440Hz sine tone on speaker for 2s",
+        .func = &cmd_voice_test_spk,
+    };
+    esp_console_cmd_register(&voice_test_spk_cmd);
+#endif
+
+
     /* set_search_key */
     search_key_args.key = arg_str1(NULL, NULL, "<key>", "Brave Search API key");
     search_key_args.end = arg_end(1);
@@ -1007,6 +1333,41 @@ esp_err_t serial_cli_init(void)
         .argtable = &proxy_args,
     };
     esp_console_cmd_register(&proxy_cmd);
+
+#if MIMI_VOICE_ENABLED
+    /* set_stt_url */
+    stt_url_args.url = arg_str1(NULL, NULL, "<url>", "STT API endpoint URL");
+    stt_url_args.end = arg_end(1);
+    esp_console_cmd_t set_stt_url_cmd = {
+        .command = "set_stt_url",
+        .help = "Set STT API URL (saved to NVS voice_config/stt_url)",
+        .func = &cmd_set_stt_url,
+        .argtable = &stt_url_args,
+    };
+    esp_console_cmd_register(&set_stt_url_cmd);
+
+    /* set_tts_url */
+    tts_url_args.url = arg_str1(NULL, NULL, "<url>", "TTS API endpoint URL");
+    tts_url_args.end = arg_end(1);
+    esp_console_cmd_t set_tts_url_cmd = {
+        .command = "set_tts_url",
+        .help = "Set TTS API URL (saved to NVS voice_config/tts_url)",
+        .func = &cmd_set_tts_url,
+        .argtable = &tts_url_args,
+    };
+    esp_console_cmd_register(&set_tts_url_cmd);
+
+    /* set_wake_word */
+    wake_word_args.model = arg_str1(NULL, NULL, "<model>", "Wake-word model name");
+    wake_word_args.end = arg_end(1);
+    esp_console_cmd_t set_wake_word_cmd = {
+        .command = "set_wake_word",
+        .help = "Set wake-word model (saved to NVS, restart required)",
+        .func = &cmd_set_wake_word,
+        .argtable = &wake_word_args,
+    };
+    esp_console_cmd_register(&set_wake_word_cmd);
+#endif
 
     /* clear_proxy */
     esp_console_cmd_t clear_proxy_cmd = {
