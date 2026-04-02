@@ -120,6 +120,39 @@
 /* GPIO */
 #define MIMI_GPIO_CONFIG_SECTION     1   /* enable GPIO tools */
 
+/* Voice Channel */
+#ifndef MIMI_VOICE_ENABLED
+#define MIMI_VOICE_ENABLED           1
+#endif
+
+/* I2S Mic (INMP441) */
+#define MIMI_I2S_MIC_BCLK_GPIO       4
+#define MIMI_I2S_MIC_WS_GPIO         5
+#define MIMI_I2S_MIC_DIN_GPIO        6
+
+/* I2S Speaker (MAX98357A) */
+#define MIMI_I2S_SPK_BCLK_GPIO       15
+#define MIMI_I2S_SPK_WS_GPIO         16
+#define MIMI_I2S_SPK_DOUT_GPIO       17
+#define MIMI_I2S_SPK_SD_GPIO         18
+
+/* Voice task config */
+#define MIMI_VOICE_FEED_STACK        (8 * 1024)
+#define MIMI_VOICE_DETECT_STACK      (8 * 1024)
+#define MIMI_VOICE_FEED_PRIO         8
+#define MIMI_VOICE_DETECT_PRIO       7
+#define MIMI_VOICE_FEED_CORE         0
+#define MIMI_VOICE_DETECT_CORE       1
+
+/* Voice audio windows */
+#define MIMI_VOICE_MAX_RECORD_MS     10000
+#define MIMI_VOICE_SILENCE_TIMEOUT_MS 1500
+#define MIMI_VOICE_MIN_SPEECH_MS     500
+
+/* Voice STT/TTS timeouts */
+#define MIMI_VOICE_STT_TIMEOUT_MS    15000
+#define MIMI_VOICE_TTS_TIMEOUT_MS    15000
+
 /* Skills */
 #define MIMI_SKILLS_PREFIX           MIMI_SPIFFS_BASE "/skills/"
 
